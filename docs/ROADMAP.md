@@ -24,9 +24,17 @@ difficulty.
 
 ## Later
 
-* **More drivers.** Moonraker/Klipper and OctoPrint are the obvious next two —
-  both have documented HTTP APIs and would exercise whether the `Printer` ABC is
-  genuinely vendor-neutral. Prusa Connect and Duet after that.
+* **Vacuum scheduling.** The scheduler is printer-shaped today (it queues a
+  file). Generalising it to "clean the kitchen at 09:00 on weekdays" is mostly
+  a matter of making the job payload a device command rather than a path.
+* **Obstacle photos.** The Saros reports obstacle snapshots; surfacing them the
+  way `capture_snapshot` surfaces the printer camera would let a model see what
+  the robot refused to drive over.
+
+* **More drivers.** A Roborock vacuum now shares the device layer with the
+  printers, which is what proved the abstraction was not merely printer-shaped.
+  Moonraker/Klipper and OctoPrint are the obvious next two for printers; for
+  vacuums, Dreame and Ecovacs have comparable community libraries.
 * **X1/H2 camera.** RTSPS on port 322 instead of the tcp/6000 JPEG stream;
   needs an RTSP client and a frame grabber.
 * **Recurring schedules.** Cron-style repeats ("every weekday at 07:00") on top

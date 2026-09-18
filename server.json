@@ -1,8 +1,8 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.zhenwei2972/mhs-printer",
-  "title": "Bambu Lab 3D printers (MHS)",
-  "description": "Operate Bambu Lab 3D printers over the LAN: print, schedule, monitor, camera, printability",
+  "title": "Bambu Lab printers & Roborock vacuums (MHS)",
+  "description": "Operate Bambu Lab 3D printers and Roborock vacuums: print, clean, schedule, map, camera",
   "version": "0.1.0",
   "repository": {
     "url": "https://github.com/zhenwei2972/Model-hardware-standard-Bambu-labs-",
@@ -63,6 +63,19 @@
           "description": "Set to 1 to run against a simulated printer, so every tool can be tried without hardware.",
           "isRequired": false,
           "default": "0",
+          "format": "string"
+        },
+        {
+          "name": "ROBOROCK_EMAIL",
+          "description": "Roborock account email. Run `mhs roborock-login` once to exchange it for a stored token.",
+          "isRequired": false,
+          "format": "string"
+        },
+        {
+          "name": "ROBOROCK_CREDENTIALS",
+          "description": "Path to the stored Roborock token (written mode 600); defaults to the state directory.",
+          "isRequired": false,
+          "isSecret": true,
           "format": "string"
         }
       ]

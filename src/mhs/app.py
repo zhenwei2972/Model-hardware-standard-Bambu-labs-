@@ -12,7 +12,7 @@ import time
 from pathlib import Path
 
 from .config import Settings, load_settings
-from .device import Printer
+from .device import Device
 from .drivers import build
 from .errors import ControlDisabled
 from .scheduler import PrintScheduler
@@ -21,35 +21,35 @@ from .store import Store
 log = logging.getLogger(__name__)
 
 
-class PrinterPool:
+class DevicePool:
     """Lazily connects printers and keeps them connected."""
 
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
-        self._printers: dict[str, Printer] = {}
+        self._devices: dict[str, Device] = {}
         self._locks: dict[str, asyncio.Lock] = {}
 
     def ids(self) -> list[str]:
-        return sorted(self.settings.printers)
+        return sorted(self.settings.devices)
 
-    async def get(self, printer_id: str | None = None) -> Printer:
-        config = self.settings.get(printer_id)
-        lock = self._locks.setdefault(config.printer_id, asyncio.Lock())
+    async def get(self, device_id: str | None = None) -> Device:
+        config = self.settings.get(device_id)
+        lock = self._locks.setdefault(config.device_id, asyncio.Lock())
         async with lock:
-            printer = self._printers.get(config.printer_id)
-            if printer is None:
-                printer = build(config)
-                self._printers[config.printer_id] = printer
-            await printer.connect()
-            return printer
+            device = self._devices.get(config.device_id)
+            if device is None:
+                device = build(config, state_dir=self.settings.state_dir)
+                self._devices[config.device_id] = device
+            await device.connect()
+            return device
 
     async def close(self) -> None:
-        for printer in list(self._printers.values()):
+        for device in list(self._devices.values()):
             try:
-                await printer.disconnect()
+                await device.disconnect()
             except Exception:  # pragma: no cover - shutdown is best effort
-                log.debug("disconnect failed for %s", printer.printer_id, exc_info=True)
-        self._printers.clear()
+                log.debug("disconnect failed for %s", device.device_id, exc_info=True)
+        self._devices.clear()
 
 
 class MHSApp:
@@ -57,7 +57,7 @@ class MHSApp:
 
     def __init__(self, settings: Settings | None = None) -> None:
         self.settings = settings or load_settings()
-        self.pool = PrinterPool(self.settings)
+        self.pool = DevicePool(self.settings)
         self.store = Store(self.settings.db_path)
         self.scheduler = PrintScheduler(
             self.store,
@@ -77,15 +77,19 @@ class MHSApp:
         self.store.close()
 
     # -- helpers -----------------------------------------------------------
-    async def printer(self, printer_id: str | None = None) -> Printer:
-        return await self.pool.get(printer_id)
+    async def device(self, device_id: str | None = None) -> Device:
+        return await self.pool.get(device_id)
+
+    async def printer(self, device_id: str | None = None) -> Device:
+        """Alias kept for the printer-side call sites."""
+        return await self.pool.get(device_id)
 
     def require_writable(self, action: str) -> None:
         if self.settings.read_only:
             raise ControlDisabled(f"refusing to {action}: this MHS server runs read-only")
 
-    def capture_path(self, printer_id: str, label: str = "frame") -> Path:
-        directory = self.settings.capture_dir / printer_id
+    def capture_path(self, device_id: str, label: str = "frame") -> Path:
+        directory = self.settings.capture_dir / device_id
         directory.mkdir(parents=True, exist_ok=True)
         stamp = time.strftime("%Y%m%d-%H%M%S")
         return directory / f"{stamp}-{label}.jpg"

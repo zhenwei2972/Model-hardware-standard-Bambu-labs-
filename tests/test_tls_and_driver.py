@@ -49,7 +49,7 @@ def test_verify_without_a_serial_falls_back_to_ca_only():
 def bambu():
     return build(
         PrinterConfig(
-            printer_id="a1mini",
+            device_id="a1mini",
             driver="bambu",
             model="A1 mini",
             host="192.0.2.10",

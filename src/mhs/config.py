@@ -24,11 +24,21 @@ except ModuleNotFoundError:  # pragma: no cover - 3.10 fallback
 
 from .errors import ConfigError
 
-DEFAULT_CONFIG_PATHS = (
-    Path(os.environ.get("MHS_CONFIG", "")) if os.environ.get("MHS_CONFIG") else None,
-    Path.cwd() / "config.toml",
-    Path.home() / ".config" / "mhs" / "config.toml",
-)
+
+def default_config_paths(env: dict | None = None) -> list[Path]:
+    """Where to look for config.toml, in order.
+
+    Computed per call rather than at import: ``MHS_CONFIG`` and the working
+    directory can both change after this module is loaded, and a constant
+    captured at import silently ignores either.
+    """
+    env = dict(os.environ if env is None else env)
+    candidates = []
+    if env.get("MHS_CONFIG"):
+        candidates.append(Path(env["MHS_CONFIG"]).expanduser())
+    candidates.append(Path.cwd() / "config.toml")
+    candidates.append(Path.home() / ".config" / "mhs" / "config.toml")
+    return candidates
 
 
 def _as_bool(value: object, default: bool = False) -> bool:
@@ -40,10 +50,10 @@ def _as_bool(value: object, default: bool = False) -> bool:
 
 
 @dataclass
-class PrinterConfig:
-    """One entry of the ``[printers.*]`` table."""
+class DeviceConfig:
+    """One entry of the ``[devices.*]`` (or legacy ``[printers.*]``) table."""
 
-    printer_id: str
+    device_id: str
     driver: str = "bambu"
     model: str = "A1 mini"
     host: str = ""
@@ -59,26 +69,30 @@ class PrinterConfig:
     ftps_port: int = 990
     extra: dict = field(default_factory=dict)
 
+    #: Drivers whose whole configuration lives in `extra`, validated by the
+    #: driver itself rather than here.
+    SELF_VALIDATING = frozenset({"mock", "mock_vacuum", "roborock"})
+
     def validate(self) -> None:
-        if self.driver == "mock":
+        if self.driver in self.SELF_VALIDATING:
             return
         missing = [k for k in ("host", "serial", "access_code") if not getattr(self, k)]
         if missing:
             raise ConfigError(
-                f"printer '{self.printer_id}' is missing: {', '.join(missing)}",
+                f"printer '{self.device_id}' is missing: {', '.join(missing)}",
                 hint="Printer screen: Settings > Network shows IP + Access Code; "
                 "the serial is on the sticker or in Bambu Studio > Device.",
             )
         if self.tls_mode not in {"verify", "ca_only", "insecure"}:
-            raise ConfigError(f"printer '{self.printer_id}': tls_mode must be verify|ca_only|insecure")
+            raise ConfigError(f"printer '{self.device_id}': tls_mode must be verify|ca_only|insecure")
 
 
 @dataclass
 class Settings:
     """Whole-process configuration."""
 
-    printers: dict[str, PrinterConfig] = field(default_factory=dict)
-    default_printer: str | None = None
+    devices: dict[str, DeviceConfig] = field(default_factory=dict)
+    default_device: str | None = None
     read_only: bool = False
     allow_raw_gcode: bool = False
     state_dir: Path = field(default_factory=lambda: Path.home() / ".local" / "share" / "mhs")
@@ -91,34 +105,34 @@ class Settings:
     def capture_dir(self) -> Path:
         return self.state_dir / "captures"
 
-    def get(self, printer_id: str | None = None) -> PrinterConfig:
-        if not self.printers:
+    def get(self, device_id: str | None = None) -> DeviceConfig:
+        if not self.devices:
             raise ConfigError(
-                "no printers configured",
+                "no devices configured",
                 hint="Create config.toml (see examples/config.example.toml) or set "
                 "BAMBU_HOST, BAMBU_SERIAL and BAMBU_ACCESS_CODE.",
             )
-        if printer_id is None:
-            if self.default_printer:
-                return self.printers[self.default_printer]
-            if len(self.printers) == 1:
-                return next(iter(self.printers.values()))
+        if device_id is None:
+            if self.default_device:
+                return self.devices[self.default_device]
+            if len(self.devices) == 1:
+                return next(iter(self.devices.values()))
             raise ConfigError(
-                f"several printers configured ({', '.join(sorted(self.printers))}); name one"
+                f"several devices configured ({', '.join(sorted(self.devices))}); name one"
             )
         try:
-            return self.printers[printer_id]
+            return self.devices[device_id]
         except KeyError:
             raise ConfigError(
-                f"unknown printer '{printer_id}' (have: {', '.join(sorted(self.printers)) or 'none'})"
+                f"unknown device '{device_id}' (have: {', '.join(sorted(self.devices)) or 'none'})"
             ) from None
 
 
-def _printer_from_table(printer_id: str, table: dict) -> PrinterConfig:
-    known = {f for f in PrinterConfig.__dataclass_fields__ if f not in {"printer_id", "extra"}}
+def _device_from_table(device_id: str, table: dict) -> DeviceConfig:
+    known = {f for f in DeviceConfig.__dataclass_fields__ if f not in {"device_id", "extra"}}
     kwargs = {k: v for k, v in table.items() if k in known}
     extra = {k: v for k, v in table.items() if k not in known}
-    return PrinterConfig(printer_id=printer_id, extra=extra, **kwargs)
+    return DeviceConfig(device_id=device_id, extra=extra, **kwargs)
 
 
 def load_settings(path: str | Path | None = None, env: dict | None = None) -> Settings:
@@ -126,15 +140,17 @@ def load_settings(path: str | Path | None = None, env: dict | None = None) -> Se
     env = dict(os.environ if env is None else env)
     settings = Settings()
 
-    candidates = [Path(path)] if path else [p for p in DEFAULT_CONFIG_PATHS if p]
+    candidates = [Path(path).expanduser()] if path else default_config_paths(env)
     for candidate in candidates:
         if candidate.is_file():
             with candidate.open("rb") as fh:
                 raw = tomllib.load(fh)
-            for pid, table in (raw.get("printers") or {}).items():
-                settings.printers[pid] = _printer_from_table(pid, table)
+            # `[devices.*]` is the current spelling; `[printers.*]` still works.
+            for section in ("devices", "printers"):
+                for pid, table in (raw.get(section) or {}).items():
+                    settings.devices[pid] = _device_from_table(pid, table)
             server = raw.get("server") or {}
-            settings.default_printer = server.get("default_printer")
+            settings.default_device = server.get("default_device") or server.get("default_printer")
             settings.read_only = _as_bool(server.get("read_only"), False)
             settings.allow_raw_gcode = _as_bool(server.get("allow_raw_gcode"), False)
             if server.get("state_dir"):
@@ -144,8 +160,8 @@ def load_settings(path: str | Path | None = None, env: dict | None = None) -> Se
     # Environment: a single printer described inline, handy for `docker run -e ...`
     if env.get("BAMBU_HOST"):
         pid = env.get("BAMBU_PRINTER_ID", "a1mini")
-        settings.printers[pid] = PrinterConfig(
-            printer_id=pid,
+        settings.devices[pid] = DeviceConfig(
+            device_id=pid,
             driver=env.get("BAMBU_DRIVER", "bambu"),
             model=env.get("BAMBU_MODEL", "A1 mini"),
             host=env["BAMBU_HOST"],
@@ -154,11 +170,11 @@ def load_settings(path: str | Path | None = None, env: dict | None = None) -> Se
             tls_mode=env.get("BAMBU_TLS_MODE", "verify"),
             upload_dir=env.get("BAMBU_UPLOAD_DIR", "cache"),
         )
-        settings.default_printer = settings.default_printer or pid
+        settings.default_device = settings.default_device or pid
 
     if _as_bool(env.get("MHS_MOCK")):
-        settings.printers["mock"] = PrinterConfig(printer_id="mock", driver="mock", model="MHS Mock A1 mini")
-        settings.default_printer = settings.default_printer or "mock"
+        settings.devices["mock"] = DeviceConfig(device_id="mock", driver="mock", model="MHS Mock A1 mini")
+        settings.default_device = settings.default_device or "mock"
 
     if env.get("MHS_READ_ONLY") is not None:
         settings.read_only = _as_bool(env.get("MHS_READ_ONLY"))
@@ -167,8 +183,12 @@ def load_settings(path: str | Path | None = None, env: dict | None = None) -> Se
     if env.get("MHS_STATE_DIR"):
         settings.state_dir = Path(env["MHS_STATE_DIR"]).expanduser()
 
-    if settings.default_printer and settings.default_printer not in settings.printers:
-        raise ConfigError(f"default_printer '{settings.default_printer}' is not defined")
-    for cfg in settings.printers.values():
+    if settings.default_device and settings.default_device not in settings.devices:
+        raise ConfigError(f"default_device '{settings.default_device}' is not defined")
+    for cfg in settings.devices.values():
         cfg.validate()
     return settings
+
+
+#: Previous name for :class:`DeviceConfig`, kept so existing imports keep working.
+PrinterConfig = DeviceConfig

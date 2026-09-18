@@ -1,31 +1,37 @@
-# MHS — an MCP server for Bambu Lab 3D printers
+# MHS — an MCP server for Bambu Lab printers and Roborock vacuums
 
 <!-- mcp-name: io.github.zhenwei2972/mhs-printer -->
 
-Connect Claude (or any MCP client) to a **Bambu Lab A1 mini, A1, P1P, P1S or X1**
-over your local network — no cloud account. Start and schedule prints, monitor
-them, read the chamber camera, measure printed parts against a reference object,
-and check whether a model is actually printable before slicing it.
+Connect Claude (or any MCP client) to real hardware:
+
+* **Bambu Lab A1 mini, A1, P1P, P1S, X1** over your local network, no cloud
+  account — start and schedule prints, monitor them, read the chamber camera,
+  measure printed parts against a reference object, and check whether a model
+  is printable before slicing it.
+* **Roborock Saros 10, 10R, Z70** — send the robot to a point you picked off its
+  map, clean rooms by name, save named locations, and drive the dock.
 
 Built on a vendor-neutral driver layer and aligned to Anthropic's
 [Model Hardware Standard](https://www.anthropic.com/news/model-hardware-standard-research-preview):
 `read`/`write` primitives over named channels, a discoverable device
 descriptor, and safety limits enforced in the driver rather than the prompt.
 
-**Supported hardware:** Bambu Lab A1 mini · A1 · P1P · P1S · X1 Carbon · X1E,
-over LAN MQTT (8883), FTPS (990) and the chamber camera (6000).
+**Supported hardware:** Bambu Lab A1 mini · A1 · P1P · P1S · X1 Carbon · X1E
+(LAN MQTT 8883, FTPS 990, chamber camera 6000) · Roborock Saros 10 · Saros 10R ·
+Saros Z70 and the wider V1 vacuum family (Roborock cloud).
 **Works with:** Claude Code, Claude Desktop, and any MCP-compatible client.
 
 ```
-                        ┌─ standard/  read/write channels + safety limits + device descriptor
-Claude ──MCP(stdio)──▶  │             (the MHS-shaped surface)
-                        ├─ design/    mesh · render · printability · camera measurement
-       mhs server ──────┤
-                        ├─ scheduler + print journal (SQLite)
-                        │
-                        └─ Printer ABC ──▶ bambu driver ──▶ MQTT 8883  telemetry + control
-                                        └▶ mock driver      FTPS  990  sliced file upload
-                                                            TCP   6000 JPEG camera frames
+                     ┌─ standard/  read/write channels + limits + device descriptor
+Claude ─MCP(stdio)─▶ │             (the MHS surface — identical for every device)
+                     ├─ design/    mesh · render · printability · camera & map measurement
+    mhs server ──────┤
+                     ├─ scheduler + print journal + named locations (SQLite)
+                     │
+                     └─ Device ─┬─ Printer ─┬─ bambu     MQTT 8883 · FTPS 990 · cam 6000
+                                │           └─ mock
+                                └─ Vacuum ──┬─ roborock  cloud MQTT (via python-roborock)
+                                            └─ mock_vacuum
 ```
 
 ## Relationship to Anthropic's Model Hardware Standard
@@ -67,10 +73,18 @@ below.
 
 ## What works today
 
+Discovery and the MHS primitives are shared by every device; the rest is per
+device kind.
+
 | Area | Tools |
 | --- | --- |
-| Discovery | `list_printers`, `get_printer_info`, `check_connection`, `describe_device` |
+| Discovery | `list_devices`, `get_printer_info`, `check_connection`, `describe_device` |
 | MHS primitives | `list_channels`, `read_channel`, `write_channel` |
+
+### 3D printers
+
+| Area | Tools |
+| --- | --- |
 | Monitoring | `get_status` (state, layer, progress, temps, filament, decoded HMS alerts) |
 | Files | `list_files`, `upload_file` |
 | Printing | `start_print`, `upload_and_print`, `pause_print`, `resume_print`, `stop_print` |
@@ -82,6 +96,32 @@ below.
 | Iteration | `log_print_result`, `record_observation`, `list_print_history`, `get_print_run` |
 | Resources | `mhs://printers`, `mhs://printer/{id}/status`, `mhs://printer/{id}/history`, `mhs://printer/{id}/descriptor`, `mhs://reference-objects` |
 | Prompts | `diagnose_print`, `tune_settings`, `design_iteration` |
+
+### Robot vacuums
+
+| Area | Tools |
+| --- | --- |
+| Monitoring | `vacuum_status` (state, battery, suction, position, faults) |
+| Map | `get_map` (rendered with a millimetre grid, rooms, robot and dock), `list_rooms` |
+| Cleaning | `start_cleaning` (whole map or rooms by name), `clean_zone`, `pause_cleaning`, `resume_cleaning`, `stop_cleaning`, `return_to_dock` |
+| Aiming | `go_to` (coordinates, a room name, or a saved location), `save_location`, `list_locations`, `delete_location` |
+| Settings | `set_suction`, `set_water_flow`, `find_vacuum` |
+
+Full guide: [docs/ROBOROCK.md](docs/ROBOROCK.md).
+
+#### Sending it somewhere
+
+The map arrives as a picture plus calibration points relating pixels to the
+robot's own millimetre frame. `get_map` renders it with a grid **labelled in
+those millimetres**, so a coordinate read off the image goes straight into
+`go_to`:
+
+> *"Show me the map. Send it to the spot just inside the back door, and save
+> that as 'back door' so I can say it next time."*
+
+Coordinates are checked against the map's real extent first — the protocol
+accepts anything in a wide range, and an off-map target makes the robot do
+nothing at all, which reads as a silent failure.
 
 Not included: slicing. The design tools work on `.stl`/`.obj`/`.3mf` meshes and
 stop at "ready to slice"; hand the printer a sliced plate from Bambu Studio or
@@ -129,7 +169,10 @@ cd Model-hardware-standard-Bambu-labs-
 python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"
 ```
 
-## Configure the printer
+## Configure a printer
+
+For a vacuum instead, see [docs/ROBOROCK.md](docs/ROBOROCK.md) — it is a
+different setup (an account token, not a LAN code).
 
 On the printer's touchscreen: **Settings → General**
 
@@ -176,9 +219,9 @@ Then, in a session:
 
 ## Testing it
 
-Three tiers. The first two need no printer, and each stands on its own.
+Three tiers. The first two need no hardware, and each stands on its own.
 
-### 1. No printer, no Claude
+### 1. No hardware, no Claude
 
 Exercises every code path except the real transports:
 
@@ -192,13 +235,19 @@ export MHS_MOCK=1                    # a simulated A1 mini
 .venv/bin/mhs preview your-model.stl -o preview.png
 .venv/bin/mhs grid && .venv/bin/mhs calibrate sgd_1 100 && .venv/bin/mhs measure 0 0 200 0
 .venv/bin/mhs doctor
+
+# and the vacuum half, against a simulated Saros
+printf '[server]\ndefault_device="saros"\n[devices.saros]\ndriver="mock_vacuum"\n' > config.toml
+.venv/bin/mhs vacuum && .venv/bin/mhs rooms
+.venv/bin/mhs map -o map.png          # open it: the grid is in robot millimetres
+.venv/bin/mhs goto "dog bowl" --x 24200 --y 26200 -y
 ```
 
 With `MHS_MOCK=1` each CLI command is a fresh process, so `mhs print` followed
 by `mhs status` shows idle again — the fake printer has no memory between
 invocations. Inside one MCP session it persists normally.
 
-### 2. Wired to Claude, still no printer
+### 2. Wired to Claude, still no hardware
 
 Checks the tools from the model's side before hardware is involved:
 
@@ -213,7 +262,7 @@ claude mcp add mhs-demo --env MHS_MOCK=1 -- "$PWD/.venv/bin/mhs-mcp"
 A rendered image and a printability verdict means the whole stack works — only
 the transports are untested.
 
-### 3. The real printer
+### 3. Real hardware
 
 ```bash
 .venv/bin/mhs doctor
@@ -264,11 +313,28 @@ Hardware that heats to 220 °C deserves more care than a web API:
   environment; both are git-ignored, and nothing is sent anywhere but the
   printer on your LAN.
 
-## Making it generic
+## Is it actually generic?
 
-`mhs/device.py` defines one small ABC (`Printer`) plus a `Capability` enum;
-everything above it — the 25 MCP tools, the scheduler, the CLI, the journal —
-talks only to that. A driver is one class and one `register()` call:
+It claimed to be, and then a robot vacuum tested the claim. Three layers:
+
+```
+Device   channels · read/write · safety limits · descriptor · capabilities
+  ├─ Printer   nozzle, bed, files, plates, prints
+  └─ Vacuum    rooms, zones, coordinates, dock
+```
+
+`Device` (`mhs/device.py`) is what the MCP tools, the CLI and the descriptor
+generator talk to. A **device class** adds the verbs for its kind of hardware
+and declares its channels; a **driver** implements one of those. Adding the
+vacuum needed no change to the channel machinery, the limit enforcement, the
+descriptor generator, the CLI plumbing or the confirmation gates — they were
+already device-shaped. What it did change, honestly: `printer_id` became
+`device_id` throughout (with a SQLite migration), the descriptor's
+printer-specific sections moved behind a `descriptor_profile()` hook that each
+device class fills in, and `[printers.*]` in config.toml became `[devices.*]`
+(the old spelling still loads).
+
+A new driver is one class and one `register()` call:
 
 ```python
 class MoonrakerPrinter(Printer):
@@ -278,26 +344,35 @@ class MoonrakerPrinter(Printer):
     async def status(self) -> PrinterStatus: ...
 ```
 
-Tools check `printer.require(Capability.CAMERA_SNAPSHOT)` rather than asking
-what brand it is, so a driver that lacks a feature degrades with a clear message
-instead of a stack trace. `drivers/mock.py` is a complete worked example (and is
-what the test suite runs against).
+…and it gets the MHS read/write channels, the enforced limits and a descriptor
+for free, because the base class builds them from the capabilities it declares.
+Tools call `device.require(Capability.CAMERA_SNAPSHOT)` rather than asking what
+brand it is, so a driver that lacks a feature degrades with a clear message
+instead of a stack trace — and naming a vacuum where a printer tool expects one
+is an explicit error, not a confusing failure. `drivers/mock.py` and
+`drivers/mock_vacuum.py` are complete worked examples, and are what the test
+suite runs against.
 
 ## Layout
 
 ```
 src/mhs/
-  device.py        Printer ABC, capabilities, read/write  models.py   normalised status/telemetry types
-  config.py        TOML + env configuration               store.py    SQLite: jobs, journal, calibration
-  scheduler.py     deferred prints, pre-flight, windows   app.py      pool + store + scheduler wiring
-  specs.py         hardware specs and detail limits       server.py   the MCP surface
-  cli.py           the same capabilities for humans
-  standard/        channels.py (limits), descriptor.py (the MHS device reference file)
-  design/          mesh.py (STL/OBJ/3MF), render.py (z-buffer rasteriser),
-                   printability.py (the critique), vision.py (camera measurement)
-  drivers/bambu/   mqtt.py files.py camera.py commands.py state.py hms.py tls.py
-  drivers/mock.py  simulated printer
-docs/              PROTOCOL.md, SETUP.md, DESIGN_LOOP.md, MHS_ALIGNMENT.md, ROADMAP.md
+  device.py          Device base: channels, read/write, descriptor, capabilities
+  printer.py         Printer device class      vacuum.py   Vacuum device class
+  models.py          normalised status types   specs.py    hardware specs and limits
+  config.py          TOML + env configuration  store.py    SQLite: jobs, journal,
+  scheduler.py       deferred prints                       calibration, locations
+  app.py             pool + store + scheduler  server.py   the MCP surface
+  cli.py             the same capabilities for humans
+  standard/          channels.py (limits), descriptor.py (the MHS reference file)
+  design/            mesh.py (STL/OBJ/3MF), render.py (z-buffer rasteriser),
+                     printability.py (the critique), vision.py (camera measurement),
+                     mapviz.py (map grid + pixel/millimetre transform)
+  drivers/bambu/     mqtt.py files.py camera.py commands.py state.py hms.py tls.py
+  drivers/roborock/  client.py (credentials) commands.py state.py vacuum.py
+  drivers/mock.py    simulated printer         drivers/mock_vacuum.py  simulated robot
+docs/                PROTOCOL.md, SETUP.md, ROBOROCK.md, DESIGN_LOOP.md,
+                     MHS_ALIGNMENT.md, PUBLISHING.md, ROADMAP.md
 ```
 
 ## Tests

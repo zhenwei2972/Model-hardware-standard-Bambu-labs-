@@ -30,11 +30,11 @@ async def test_every_tool_is_advertised_with_a_description(server):
     assert all(t.description for t in tools)
 
 
-async def test_list_printers_reports_capabilities(server):
-    body = await call(server, "list_printers")
+async def test_list_devices_reports_capabilities(server):
+    body = await call(server, "list_devices")
     assert body["ok"] is True
-    entry = body["printers"][0]
-    assert entry["printer_id"] == "mock" and entry["connected"] is True
+    entry = body["devices"][0]
+    assert entry["device_id"] == "mock" and entry["connected"] is True
     assert "camera_snapshot" in entry["capabilities"]
 
 
@@ -116,7 +116,7 @@ async def test_snapshot_returns_an_image_and_saves_it(server, settings):
     assert content.type == "image" and content.mime_type == "image/jpeg"
     saved = list((settings.capture_dir / "mock").glob("*.jpg"))
     assert len(saved) == 1
-    observations = server.mhs_app.store.list_observations(printer_id="mock")
+    observations = server.mhs_app.store.list_observations(device_id="mock")
     assert observations[0]["image_path"] == str(saved[0])
 
 

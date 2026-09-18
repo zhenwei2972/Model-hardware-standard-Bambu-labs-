@@ -12,8 +12,7 @@ import base64
 import time
 from pathlib import Path
 
-from ..config import PrinterConfig
-from ..device import Printer
+from ..config import DeviceConfig
 from ..errors import DeviceBusy, FileTransferError
 from ..models import (
     Capability,
@@ -26,6 +25,7 @@ from ..models import (
     PrintState,
     Temperature,
 )
+from ..printer import Printer
 
 # A 1x1 JPEG: enough for the image plumbing to be exercised end to end.
 _TINY_JPEG = base64.b64decode(
@@ -44,8 +44,8 @@ class MockPrinter(Printer):
     print_duration = 60.0
     total_layers = 120
 
-    def __init__(self, config: PrinterConfig) -> None:
-        super().__init__(config.printer_id, config.model or "A1 mini")
+    def __init__(self, config: DeviceConfig) -> None:
+        super().__init__(config.device_id, config.model or "A1 mini")
         self.config = config
         self.connected = False
         self.files: dict[str, FileEntry] = {
@@ -89,7 +89,7 @@ class MockPrinter(Printer):
 
     async def info(self) -> PrinterInfo:
         return PrinterInfo(
-            printer_id=self.printer_id,
+            device_id=self.device_id,
             driver=self.driver_name,
             model=self.config.model or "Mock A1 mini",
             host="127.0.0.1",
@@ -115,7 +115,7 @@ class MockPrinter(Printer):
         fraction = min(1.0, self._elapsed() / self.print_duration) if self._started_at else 0.0
         active = self._state.is_active
         return PrinterStatus(
-            printer_id=self.printer_id,
+            device_id=self.device_id,
             state=self._state if self.connected else PrintState.OFFLINE,
             online=self.connected,
             job_name=self._job,
@@ -164,7 +164,7 @@ class MockPrinter(Printer):
             self.fail_next = None
             raise DeviceBusy("simulated printer busy")
         if not self._state.accepts_new_job:
-            raise DeviceBusy(f"{self.printer_id} is {self._state.value}")
+            raise DeviceBusy(f"{self.device_id} is {self._state.value}")
         if remote_path.strip("/") not in self.files:
             raise FileTransferError(f"{remote_path} is not on the printer")
         self._state = PrintState.RUNNING
@@ -177,7 +177,7 @@ class MockPrinter(Printer):
 
     async def pause_print(self) -> dict:
         if self._state is not PrintState.RUNNING:
-            raise DeviceBusy(f"{self.printer_id} is {self._state.value}, not running")
+            raise DeviceBusy(f"{self.device_id} is {self._state.value}, not running")
         self._state = PrintState.PAUSED
         self._paused_at = self.now()
         self.commands.append(("pause", {}))
@@ -185,7 +185,7 @@ class MockPrinter(Printer):
 
     async def resume_print(self) -> dict:
         if self._state is not PrintState.PAUSED:
-            raise DeviceBusy(f"{self.printer_id} is {self._state.value}, not paused")
+            raise DeviceBusy(f"{self.device_id} is {self._state.value}, not paused")
         if self._paused_at is not None:
             self._paused_total += self.now() - self._paused_at
             self._paused_at = None

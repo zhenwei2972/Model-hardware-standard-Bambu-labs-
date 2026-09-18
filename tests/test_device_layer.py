@@ -5,10 +5,10 @@ from __future__ import annotations
 import pytest
 
 from mhs.config import PrinterConfig
-from mhs.device import Printer
 from mhs.drivers import available, build
 from mhs.errors import ConfigError, NotSupported, TimeoutExceeded
 from mhs.models import Capability, PrintState
+from mhs.printer import Printer
 
 
 def test_registry_knows_the_builtin_drivers():
@@ -17,7 +17,7 @@ def test_registry_knows_the_builtin_drivers():
 
 def test_registry_rejects_unknown_drivers():
     with pytest.raises(ConfigError, match="unknown driver"):
-        build(PrinterConfig(printer_id="x", driver="ender3"))
+        build(PrinterConfig(device_id="x", driver="ender3"))
 
 
 def test_capability_checks_explain_themselves(printer):

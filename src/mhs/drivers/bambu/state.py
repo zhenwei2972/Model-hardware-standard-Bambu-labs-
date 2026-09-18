@@ -121,8 +121,8 @@ def _tray_to_slot(tray: dict, label: str, active: bool) -> FilamentSlot:
 class BambuState:
     """Merged view of everything the printer has told us."""
 
-    def __init__(self, printer_id: str) -> None:
-        self.printer_id = printer_id
+    def __init__(self, device_id: str) -> None:
+        self.device_id = device_id
         self.print: dict[str, Any] = {}
         self.info: dict[str, Any] = {}
         self.last_message_at: float | None = None
@@ -169,7 +169,7 @@ class BambuState:
             stage = None
 
         status = PrinterStatus(
-            printer_id=self.printer_id,
+            device_id=self.device_id,
             state=state,
             online=online,
             job_name=p.get("subtask_name") or p.get("gcode_file") or None,

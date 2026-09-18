@@ -30,3 +30,18 @@ tls_mode = "verify"            # verify | ca_only | insecure
 # [printers.demo]
 # driver = "mock"
 # model = "Mock A1 mini"
+
+# A Roborock vacuum. Run `mhs roborock-login` once first: it exchanges your
+# password for a token and stores only the token, mode 600. Needs the extra:
+#   pip install -e ".[roborock]"
+# [devices.saros]
+# driver = "roborock"
+# model = "Saros 10"              # Saros 10 | Saros 10R | Saros Z70
+# email = "you@example.com"
+# device_name = "Saros 10"        # only if the account has several robots
+# credentials_file = "~/.local/share/mhs/roborock-credentials.json"
+
+# No robot? This one needs nothing else.
+# [devices.demo-vacuum]
+# driver = "mock_vacuum"
+# model = "Saros 10"

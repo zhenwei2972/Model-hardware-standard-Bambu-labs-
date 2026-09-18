@@ -7,7 +7,7 @@ from mhs.errors import ConfigError
 
 TOML = """
 [server]
-default_printer = "a1mini"
+default_device = "a1mini"
 read_only = true
 
 [printers.a1mini]
@@ -36,15 +36,15 @@ def write(tmp_path, text=TOML):
 
 def test_loads_multiple_printers(tmp_path):
     settings = load_settings(write(tmp_path), env={})
-    assert sorted(settings.printers) == ["a1mini", "p1s"]
+    assert sorted(settings.devices) == ["a1mini", "p1s"]
     assert settings.read_only is True
-    assert settings.get().printer_id == "a1mini"
+    assert settings.get().device_id == "a1mini"
     assert settings.get("p1s").tls_mode == "ca_only"
 
 
-def test_unknown_printer_is_an_error(tmp_path):
+def test_unknown_device_is_an_error(tmp_path):
     settings = load_settings(write(tmp_path), env={})
-    with pytest.raises(ConfigError, match="unknown printer"):
+    with pytest.raises(ConfigError, match="unknown device"):
         settings.get("nope")
 
 
@@ -65,7 +65,7 @@ def test_env_only_configuration():
         },
     )
     config = settings.get()
-    assert (config.host, config.driver, config.printer_id) == ("10.0.0.7", "bambu", "a1mini")
+    assert (config.host, config.driver, config.device_id) == ("10.0.0.7", "bambu", "a1mini")
 
 
 def test_missing_credentials_are_reported_with_a_hint(tmp_path):
@@ -85,14 +85,39 @@ def test_bad_tls_mode_rejected(tmp_path):
         load_settings(path, env={})
 
 
-def test_ambiguous_default_printer(tmp_path):
-    path = write(tmp_path, TOML.replace('default_printer = "a1mini"', ""))
+def test_ambiguous_default_device(tmp_path):
+    path = write(tmp_path, TOML.replace('default_device = "a1mini"', ""))
     settings = load_settings(path, env={})
-    with pytest.raises(ConfigError, match="several printers"):
+    with pytest.raises(ConfigError, match="several devices"):
         settings.get()
 
 
-def test_no_printers_configured():
+def test_no_devices_configured():
     settings = load_settings(None, env={"MHS_CONFIG": "/nonexistent.toml"})
-    with pytest.raises(ConfigError, match="no printers configured"):
+    with pytest.raises(ConfigError, match="no devices configured"):
         settings.get()
+
+
+def test_devices_table_is_the_current_spelling(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text(
+        '[server]\ndefault_device = "saros"\n\n'
+        '[devices.saros]\ndriver = "roborock"\nmodel = "Saros 10"\n'
+        'email = "someone@example.com"\n'
+    )
+    settings = load_settings(path, env={})
+    config = settings.get()
+    assert config.driver == "roborock" and config.model == "Saros 10"
+    # Driver-specific keys land in `extra` for the driver to validate.
+    assert config.extra["email"] == "someone@example.com"
+
+
+def test_legacy_printers_table_and_default_still_load(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text(
+        '[server]\ndefault_printer = "a1"\n\n'
+        '[printers.a1]\nhost = "1.2.3.4"\nserial = "S"\naccess_code = "C"\n'
+    )
+    settings = load_settings(path, env={})
+    assert settings.default_device == "a1"
+    assert settings.get().host == "1.2.3.4"

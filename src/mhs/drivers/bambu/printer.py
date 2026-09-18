@@ -7,8 +7,7 @@ import logging
 import time
 from pathlib import Path
 
-from ...config import PrinterConfig
-from ...device import Printer
+from ...config import DeviceConfig
 from ...errors import CommandRejected, ConnectionFailed, DeviceBusy
 from ...models import (
     Capability,
@@ -18,6 +17,7 @@ from ...models import (
     PrintOptions,
     PrintState,
 )
+from ...printer import Printer
 from . import commands
 from .camera import BambuCamera
 from .files import BambuFiles, sanitize_remote_name
@@ -63,10 +63,10 @@ class BambuPrinter(Printer):
 
     driver_name = "bambu"
 
-    def __init__(self, config: PrinterConfig) -> None:
-        super().__init__(config.printer_id, config.model)
+    def __init__(self, config: DeviceConfig) -> None:
+        super().__init__(config.device_id, config.model)
         self.config = config
-        self.state = BambuState(config.printer_id)
+        self.state = BambuState(config.device_id)
         self._mqtt = BambuMqtt(
             host=config.host,
             serial=config.serial,
@@ -104,7 +104,7 @@ class BambuPrinter(Printer):
             while not self.state.print and time.monotonic() < deadline:
                 await asyncio.sleep(0.2)
             if not self.state.print:
-                log.warning("%s: connected but no telemetry yet", self.printer_id)
+                log.warning("%s: connected but no telemetry yet", self.device_id)
 
     async def disconnect(self) -> None:
         self.state.connected = False
@@ -140,7 +140,7 @@ class BambuPrinter(Printer):
 
     async def info(self) -> PrinterInfo:
         return PrinterInfo(
-            printer_id=self.printer_id,
+            device_id=self.device_id,
             driver=self.driver_name,
             model=self.config.model,
             host=self.config.host,
@@ -178,12 +178,12 @@ class BambuPrinter(Printer):
         status = await self.status()
         if not status.state.accepts_new_job:
             raise DeviceBusy(
-                f"{self.printer_id} is {status.state.value}; stop or finish the current job first"
+                f"{self.device_id} is {status.state.value}; stop or finish the current job first"
             )
         blocking = [a for a in status.alerts if a.severity in {"fatal", "serious"}]
         if blocking:
             raise DeviceBusy(
-                f"{self.printer_id} reports {blocking[0].code}; clear it before printing",
+                f"{self.device_id} reports {blocking[0].code}; clear it before printing",
                 hint=blocking[0].url,
             )
         payload = commands.project_file(
@@ -247,7 +247,7 @@ class BambuPrinter(Printer):
     async def calibrate(self, **kwargs: bool) -> dict:
         status = await self.status()
         if status.state.is_active:
-            raise DeviceBusy(f"{self.printer_id} is printing; calibration needs an idle printer")
+            raise DeviceBusy(f"{self.device_id} is printing; calibration needs an idle printer")
         payload = commands.calibration(sequence_id=self._mqtt.next_sequence(), **kwargs)
         return await asyncio.to_thread(self._mqtt.publish_and_wait, payload)
 

@@ -19,7 +19,7 @@ from typing import Any
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS scheduled_jobs (
     id              TEXT PRIMARY KEY,
-    printer_id      TEXT NOT NULL,
+    device_id      TEXT NOT NULL,
     remote_path     TEXT NOT NULL,
     options_json    TEXT NOT NULL DEFAULT '{}',
     start_at        REAL NOT NULL,
@@ -36,7 +36,7 @@ CREATE INDEX IF NOT EXISTS idx_jobs_due ON scheduled_jobs (status, start_at);
 
 CREATE TABLE IF NOT EXISTS print_runs (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
-    printer_id    TEXT NOT NULL,
+    device_id    TEXT NOT NULL,
     job_name      TEXT,
     remote_path   TEXT,
     settings_json TEXT NOT NULL DEFAULT '{}',
@@ -46,12 +46,12 @@ CREATE TABLE IF NOT EXISTS print_runs (
     started_at    REAL NOT NULL,
     ended_at      REAL
 );
-CREATE INDEX IF NOT EXISTS idx_runs_printer ON print_runs (printer_id, started_at);
+CREATE INDEX IF NOT EXISTS idx_runs_printer ON print_runs (device_id, started_at);
 
 CREATE TABLE IF NOT EXISTS observations (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     run_id      INTEGER REFERENCES print_runs (id) ON DELETE CASCADE,
-    printer_id  TEXT NOT NULL,
+    device_id  TEXT NOT NULL,
     kind        TEXT NOT NULL,
     layer       INTEGER,
     text        TEXT,
@@ -60,8 +60,18 @@ CREATE TABLE IF NOT EXISTS observations (
 );
 CREATE INDEX IF NOT EXISTS idx_obs_run ON observations (run_id, created_at);
 
+CREATE TABLE IF NOT EXISTS locations (
+    device_id   TEXT NOT NULL,
+    name        TEXT NOT NULL,
+    x_mm        REAL NOT NULL,
+    y_mm        REAL NOT NULL,
+    note        TEXT,
+    created_at  REAL NOT NULL,
+    PRIMARY KEY (device_id, name)
+);
+
 CREATE TABLE IF NOT EXISTS calibrations (
-    printer_id  TEXT PRIMARY KEY,
+    device_id  TEXT PRIMARY KEY,
     payload     TEXT NOT NULL,
     updated_at  REAL NOT NULL
 );
@@ -73,7 +83,7 @@ JOB_STATUSES = ("pending", "started", "done", "failed", "cancelled", "missed")
 @dataclass
 class ScheduledJob:
     id: str
-    printer_id: str
+    device_id: str
     remote_path: str
     options: dict
     start_at: float
@@ -90,7 +100,7 @@ class ScheduledJob:
     def from_row(cls, row: sqlite3.Row) -> ScheduledJob:
         return cls(
             id=row["id"],
-            printer_id=row["printer_id"],
+            device_id=row["device_id"],
             remote_path=row["remote_path"],
             options=json.loads(row["options_json"] or "{}"),
             start_at=row["start_at"],
@@ -133,8 +143,24 @@ class Store:
         self._db = sqlite3.connect(self.path, check_same_thread=False)
         self._db.row_factory = sqlite3.Row
         with self._lock:
+            self._migrate()
             self._db.executescript(SCHEMA)
             self._db.commit()
+
+    def _migrate(self) -> None:
+        """Bring an older database up to the current column names.
+
+        v0.1 stored everything under `printer_id`; the device layer is no longer
+        printer-only. Runs before the schema script, because the indexes below
+        reference the new name.
+        """
+        for table in ("scheduled_jobs", "print_runs", "observations", "calibrations"):
+            try:
+                columns = [row[1] for row in self._db.execute(f"PRAGMA table_info({table})")]
+            except sqlite3.DatabaseError:  # pragma: no cover - unreadable file
+                continue
+            if "printer_id" in columns and "device_id" not in columns:
+                self._db.execute(f"ALTER TABLE {table} RENAME COLUMN printer_id TO device_id")
 
     def close(self) -> None:
         with self._lock:
@@ -153,7 +179,7 @@ class Store:
     # -- scheduled jobs ----------------------------------------------------
     def add_job(
         self,
-        printer_id: str,
+        device_id: str,
         remote_path: str,
         start_at: float,
         *,
@@ -164,12 +190,12 @@ class Store:
         now = time.time()
         job_id = f"job_{uuid.uuid4().hex[:10]}"
         self._execute(
-            "INSERT INTO scheduled_jobs (id, printer_id, remote_path, options_json, start_at, "
+            "INSERT INTO scheduled_jobs (id, device_id, remote_path, options_json, start_at, "
             "window_minutes, status, note, created_at, updated_at) "
             "VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)",
             (
                 job_id,
-                printer_id,
+                device_id,
                 remote_path,
                 json.dumps(options or {}),
                 start_at,
@@ -188,13 +214,13 @@ class Store:
         return ScheduledJob.from_row(rows[0]) if rows else None
 
     def list_jobs(
-        self, printer_id: str | None = None, status: str | None = None, limit: int = 50
+        self, device_id: str | None = None, status: str | None = None, limit: int = 50
     ) -> list[ScheduledJob]:
         sql = "SELECT * FROM scheduled_jobs WHERE 1=1"
         params: list[Any] = []
-        if printer_id:
-            sql += " AND printer_id = ?"
-            params.append(printer_id)
+        if device_id:
+            sql += " AND device_id = ?"
+            params.append(device_id)
         if status:
             sql += " AND status = ?"
             params.append(status)
@@ -247,16 +273,16 @@ class Store:
     # -- print journal -----------------------------------------------------
     def start_run(
         self,
-        printer_id: str,
+        device_id: str,
         *,
         job_name: str | None = None,
         remote_path: str | None = None,
         settings: dict | None = None,
     ) -> int:
         cur = self._execute(
-            "INSERT INTO print_runs (printer_id, job_name, remote_path, settings_json, started_at) "
+            "INSERT INTO print_runs (device_id, job_name, remote_path, settings_json, started_at) "
             "VALUES (?, ?, ?, ?, ?)",
-            (printer_id, job_name, remote_path, json.dumps(settings or {}), time.time()),
+            (device_id, job_name, remote_path, json.dumps(settings or {}), time.time()),
         )
         return int(cur.lastrowid)
 
@@ -284,19 +310,19 @@ class Store:
         ]
         return run
 
-    def list_runs(self, printer_id: str | None = None, limit: int = 20) -> list[dict]:
+    def list_runs(self, device_id: str | None = None, limit: int = 20) -> list[dict]:
         sql = "SELECT * FROM print_runs"
         params: list[Any] = []
-        if printer_id:
-            sql += " WHERE printer_id = ?"
-            params.append(printer_id)
+        if device_id:
+            sql += " WHERE device_id = ?"
+            params.append(device_id)
         sql += " ORDER BY started_at DESC LIMIT ?"
         params.append(limit)
         return [_run_to_dict(r) for r in self._query(sql, tuple(params))]
 
     def add_observation(
         self,
-        printer_id: str,
+        device_id: str,
         kind: str,
         *,
         run_id: int | None = None,
@@ -305,57 +331,103 @@ class Store:
         image_path: str | None = None,
     ) -> int:
         cur = self._execute(
-            "INSERT INTO observations (run_id, printer_id, kind, layer, text, image_path, created_at) "
+            "INSERT INTO observations (run_id, device_id, kind, layer, text, image_path, created_at) "
             "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (run_id, printer_id, kind, layer, text, image_path, time.time()),
+            (run_id, device_id, kind, layer, text, image_path, time.time()),
         )
         return int(cur.lastrowid)
 
-    def list_observations(self, run_id: int | None = None, printer_id: str | None = None, limit: int = 50):
+    def list_observations(self, run_id: int | None = None, device_id: str | None = None, limit: int = 50):
         sql = "SELECT * FROM observations WHERE 1=1"
         params: list[Any] = []
         if run_id is not None:
             sql += " AND run_id = ?"
             params.append(run_id)
-        if printer_id:
-            sql += " AND printer_id = ?"
-            params.append(printer_id)
+        if device_id:
+            sql += " AND device_id = ?"
+            params.append(device_id)
         sql += " ORDER BY created_at DESC LIMIT ?"
         params.append(limit)
         return [dict(r) for r in self._query(sql, tuple(params))]
 
 
     # -- camera scale calibration -----------------------------------------
-    def save_calibration(self, printer_id: str, payload: dict) -> None:
+    def save_calibration(self, device_id: str, payload: dict) -> None:
         """Store the current mm-per-pixel for a printer's camera.
 
         One per printer: it is only valid for the camera's fixed position, so a
         newer reading always supersedes the old one.
         """
         self._execute(
-            "INSERT INTO calibrations (printer_id, payload, updated_at) VALUES (?, ?, ?) "
-            "ON CONFLICT(printer_id) DO UPDATE SET payload = excluded.payload, "
+            "INSERT INTO calibrations (device_id, payload, updated_at) VALUES (?, ?, ?) "
+            "ON CONFLICT(device_id) DO UPDATE SET payload = excluded.payload, "
             "updated_at = excluded.updated_at",
-            (printer_id, json.dumps(payload), time.time()),
+            (device_id, json.dumps(payload), time.time()),
         )
 
-    def get_calibration(self, printer_id: str) -> dict | None:
-        rows = self._query("SELECT payload FROM calibrations WHERE printer_id = ?", (printer_id,))
+    def get_calibration(self, device_id: str) -> dict | None:
+        rows = self._query("SELECT payload FROM calibrations WHERE device_id = ?", (device_id,))
         return json.loads(rows[0]["payload"]) if rows else None
 
-    def clear_calibration(self, printer_id: str) -> None:
-        self._execute("DELETE FROM calibrations WHERE printer_id = ?", (printer_id,))
+    def clear_calibration(self, device_id: str) -> None:
+        self._execute("DELETE FROM calibrations WHERE device_id = ?", (device_id,))
 
-    def latest_snapshot(self, printer_id: str) -> str | None:
+    # -- named locations ---------------------------------------------------
+    def save_location(
+        self, device_id: str, name: str, x_mm: float, y_mm: float, note: str | None = None
+    ) -> dict:
+        """Remember a point by name, so "go to the dog bowl" works next time.
+
+        Names are stored lower-cased: the caller says "Dog Bowl" once and can
+        say "dog bowl" forever after.
+        """
+        key = name.strip().lower()
+        if not key:
+            raise ValueError("a location needs a name")
+        self._execute(
+            "INSERT INTO locations (device_id, name, x_mm, y_mm, note, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(device_id, name) DO UPDATE SET x_mm = excluded.x_mm, "
+            "y_mm = excluded.y_mm, note = excluded.note, created_at = excluded.created_at",
+            (device_id, key, float(x_mm), float(y_mm), note, time.time()),
+        )
+        found = self.get_location(device_id, key)
+        assert found is not None
+        return found
+
+    def get_location(self, device_id: str, name: str) -> dict | None:
+        rows = self._query(
+            "SELECT * FROM locations WHERE device_id = ? AND name = ?",
+            (device_id, name.strip().lower()),
+        )
+        return dict(rows[0]) if rows else None
+
+    def list_locations(self, device_id: str | None = None) -> list[dict]:
+        sql = "SELECT * FROM locations"
+        params: list[Any] = []
+        if device_id:
+            sql += " WHERE device_id = ?"
+            params.append(device_id)
+        sql += " ORDER BY name"
+        return [dict(r) for r in self._query(sql, tuple(params))]
+
+    def delete_location(self, device_id: str, name: str) -> bool:
+        cursor = self._execute(
+            "DELETE FROM locations WHERE device_id = ? AND name = ?",
+            (device_id, name.strip().lower()),
+        )
+        return cursor.rowcount > 0
+
+    def latest_snapshot(self, device_id: str) -> str | None:
         """Path of the most recent camera frame saved for this printer.
 
         Measurements must run against the frame the coordinates were read from,
         so this is what `camera_measure` defaults to.
         """
         rows = self._query(
-            "SELECT image_path FROM observations WHERE printer_id = ? AND image_path IS NOT NULL "
+            "SELECT image_path FROM observations WHERE device_id = ? AND image_path IS NOT NULL "
             "ORDER BY created_at DESC LIMIT 1",
-            (printer_id,),
+            (device_id,),
         )
         return rows[0]["image_path"] if rows else None
 

@@ -20,9 +20,9 @@ import time
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta
 
-from .device import Printer
 from .errors import ConfigError, MHSError
 from .models import PrintOptions
+from .printer import Printer
 from .store import ScheduledJob, Store
 
 log = logging.getLogger(__name__)
@@ -133,7 +133,7 @@ class PrintScheduler:
             return {"job_id": job.id, "action": "skipped", "reason": "read_only"}
 
         try:
-            printer = await self.printer_factory(job.printer_id)
+            printer = await self.printer_factory(job.device_id)
             status = await printer.status()
         except MHSError as exc:
             self.store.update_job(job.id, bump_attempts=True, last_error=exc.message)
@@ -167,7 +167,7 @@ class PrintScheduler:
             return {"job_id": job.id, "action": "retry", "reason": "unacknowledged"}
 
         run_id = self.store.start_run(
-            job.printer_id,
+            job.device_id,
             job_name=options.job_name or job.remote_path,
             remote_path=job.remote_path,
             settings={"scheduled_job": job.id, **job.options},

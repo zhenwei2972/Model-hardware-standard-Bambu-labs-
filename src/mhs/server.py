@@ -30,20 +30,29 @@ from .design import vision
 from .design.printability import analyze as analyze_print
 from .design.printability import scale_advice
 from .design.render import render_to_png
-from .device import Printer
 from .errors import CommandRejected, MHSError, NotSupported
-from .models import Capability, PrintOptions
+from .models import Capability, CleanOptions, PrintOptions
+from .printer import Printer
 from .scheduler import parse_when
 from .specs import spec_for
 from .standard.descriptor import descriptor_markdown
+from .vacuum import Vacuum
 
 log = logging.getLogger(__name__)
 
 INSTRUCTIONS = """
-Control and observe 3D printers (Bambu Lab A1 mini / A1 / P1 / X1 over the LAN).
+Control and observe physical devices: Bambu Lab 3D printers (A1 mini / A1 / P1 /
+X1, over the LAN) and Roborock robot vacuums (Saros 10 / 10R / Z70, via the
+Roborock account). Every device also exposes the MHS read/write channels -
+`list_channels`, `read_channel`, `write_channel` - whose limits are enforced in
+the driver.
 
 Typical flows:
+* See what is connected: `list_devices`, then `describe_device` for one of them.
 * Check on a print: `get_status`, then `capture_snapshot` to actually look at it.
+* Send the robot somewhere: `get_map` (read coordinates off the grid), then
+  `go_to(x_mm=..., y_mm=..., confirm=True)`, or `go_to(location="kitchen")`.
+* Clean a room: `list_rooms`, then `start_cleaning(rooms=["kitchen"], confirm=True)`.
 * Design loop: `analyze_model` -> `preview_model` (look at it) -> `scale_model` ->
   print -> `camera_grid` + `camera_measure` to check the result against the model.
 * Size something against a real object: put a coin on the plate, `camera_grid`,
@@ -96,35 +105,55 @@ def create_server(settings: Settings | None = None, *, run_scheduler: bool = Tru
     )
     server.mhs_app = app  # type: ignore[attr-defined]  # convenience for tests/CLI
 
-    async def _printer(printer_id: str | None) -> Printer:
-        return await app.printer(printer_id)
+    async def _printer(device_id: str | None) -> Printer:
+        device = await app.device(device_id)
+        if not isinstance(device, Printer):
+            raise NotSupported(
+                f"{device.device_id} is a {device.device_kind.replace('_', ' ')}, "
+                "not a 3D printer",
+                hint="Use the vacuum tools for it, or name a printer with the "
+                     "`printer` argument.",
+            )
+        return device
+
+    async def _vacuum(device_id: str | None) -> Vacuum:
+        device = await app.device(device_id)
+        if not isinstance(device, Vacuum):
+            raise NotSupported(
+                f"{device.device_id} is a {device.device_kind.replace('_', ' ')}, "
+                "not a robot vacuum",
+                hint="Use the printer tools for it, or name a vacuum with the "
+                     "`vacuum` argument.",
+            )
+        return device
 
     # ---------------------------------------------------------------- status
     @server.tool()
-    async def list_printers() -> dict:
-        """List configured printers, their driver, model and capabilities."""
+    async def list_devices() -> dict:
+        """List configured devices - printers and vacuums - with their capabilities."""
         out = []
         ids = app.pool.ids()
-        default = app.settings.default_printer or (ids[0] if len(ids) == 1 else None)
+        default = app.settings.default_device or (ids[0] if len(ids) == 1 else None)
         for pid in ids:
-            config = app.settings.printers[pid]
+            config = app.settings.devices[pid]
             entry: dict[str, Any] = {
-                "printer_id": pid,
+                "device_id": pid,
                 "driver": config.driver,
                 "model": config.model,
                 "host": config.host or None,
                 "is_default": pid == default,
             }
             try:
-                printer = await _printer(pid)
-                entry["capabilities"] = [c.value for c in printer.capabilities]
+                device = await app.device(pid)
+                entry["kind"] = device.device_kind
+                entry["capabilities"] = [c.value for c in device.capabilities]
                 entry["connected"] = True
-                entry["firmware"] = (await printer.info()).firmware
+                entry["firmware"] = (await device.info()).firmware
             except MHSError as exc:
                 entry["connected"] = False
                 entry["error"] = exc.message
             out.append(entry)
-        return _ok(printers=out, read_only=app.settings.read_only)
+        return _ok(devices=out, read_only=app.settings.read_only)
 
     @server.tool()
     async def get_status(printer: str | None = None) -> dict:
@@ -230,7 +259,7 @@ def create_server(settings: Settings | None = None, *, run_scheduler: bool = Tru
             options = _options(plate, use_ams, ams_slots, bed_leveling, flow_calibration, timelapse, job_name)
             result = await device.start_print(file, options)
             run_id = app.store.start_run(
-                device.printer_id,
+                device.device_id,
                 job_name=options.job_name or Path(file).stem,
                 remote_path=file,
                 settings=options.to_dict(),
@@ -390,9 +419,9 @@ def create_server(settings: Settings | None = None, *, run_scheduler: bool = Tru
         device.require(Capability.CAMERA_SNAPSHOT)
         frame = await device.snapshot()
         if save:
-            path = app.capture_path(device.printer_id, label)
+            path = app.capture_path(device.device_id, label)
             path.write_bytes(frame)
-            app.store.add_observation(device.printer_id, kind="snapshot", image_path=str(path))
+            app.store.add_observation(device.device_id, kind="snapshot", image_path=str(path))
         return Image(data=frame, format="jpeg")
 
     @server.tool()
@@ -427,10 +456,10 @@ def create_server(settings: Settings | None = None, *, run_scheduler: bool = Tru
             except MHSError as exc:
                 return _fail(exc) if not paths else _ok(paths=paths, partial=True, error=exc.message)
             status = await device.status()
-            path = app.capture_path(device.printer_id, f"{label}-{index:03d}")
+            path = app.capture_path(device.device_id, f"{label}-{index:03d}")
             path.write_bytes(frame)
             app.store.add_observation(
-                device.printer_id, kind="snapshot", layer=status.current_layer, image_path=str(path)
+                device.device_id, kind="snapshot", layer=status.current_layer, image_path=str(path)
             )
             paths.append(str(path))
         return _ok(paths=paths, count=len(paths))
@@ -478,13 +507,13 @@ def create_server(settings: Settings | None = None, *, run_scheduler: bool = Tru
             if file.strip("/") not in known and known:
                 return _fail(
                     CommandRejected(
-                        f"{file} is not on {device.printer_id}",
+                        f"{file} is not on {device.device_id}",
                         hint=f"Upload it first. Present: {', '.join(sorted(known)[:8]) or 'nothing'}",
                     )
                 )
             options = _options(plate, use_ams, ams_slots, bed_leveling, flow_calibration, timelapse, job_name)
             job = app.store.add_job(
-                device.printer_id,
+                device.device_id,
                 file,
                 start_at,
                 options=options.to_dict(),
@@ -501,7 +530,7 @@ def create_server(settings: Settings | None = None, *, run_scheduler: bool = Tru
 
         Status is one of: pending, started, done, failed, cancelled, missed.
         """
-        jobs = app.store.list_jobs(printer_id=printer, status=status)
+        jobs = app.store.list_jobs(device_id=printer, status=status)
         return _ok(jobs=[j.to_dict() for j in jobs])
 
     @server.tool()
@@ -544,7 +573,7 @@ def create_server(settings: Settings | None = None, *, run_scheduler: bool = Tru
         kind: str = "note",
     ) -> dict:
         """Attach a note to a run (e.g. "layer 40: slight stringing on the tower")."""
-        device_id = (await _printer(printer)).printer_id if printer is None else printer
+        device_id = (await _printer(printer)).device_id if printer is None else printer
         obs_id = app.store.add_observation(device_id, kind=kind, run_id=run_id, layer=layer, text=text)
         return _ok(observation_id=obs_id)
 
@@ -554,7 +583,7 @@ def create_server(settings: Settings | None = None, *, run_scheduler: bool = Tru
 
         Use it before changing settings: compare what actually printed well.
         """
-        return _ok(runs=app.store.list_runs(printer_id=printer, limit=limit))
+        return _ok(runs=app.store.list_runs(device_id=printer, limit=limit))
 
     @server.tool()
     async def get_print_run(run_id: int) -> dict:
@@ -569,12 +598,12 @@ def create_server(settings: Settings | None = None, *, run_scheduler: bool = Tru
     async def check_connection(printer: str | None = None) -> dict:
         """Probe every transport (MQTT telemetry, file transfer, camera) and report
         what works. Run this first when something behaves oddly."""
-        report: dict[str, Any] = {"printer": printer or app.settings.default_printer}
+        report: dict[str, Any] = {"printer": printer or app.settings.default_device}
         try:
             device = await _printer(printer)
         except MHSError as exc:
             return _fail(exc)
-        report["printer"] = device.printer_id
+        report["printer"] = device.device_id
 
         try:
             status = await device.status()
@@ -632,7 +661,7 @@ def create_server(settings: Settings | None = None, *, run_scheduler: bool = Tru
         """
         try:
             model = meshlib.load_mesh(_model_path(path))
-            spec = spec_for(app.settings.get(printer).model if app.settings.printers else None)
+            spec = spec_for(app.settings.get(printer).model if app.settings.devices else None)
             report = analyze_print(
                 model, spec, nozzle_mm=nozzle_mm, layer_height_mm=layer_height_mm, material=material
             )
@@ -691,7 +720,7 @@ def create_server(settings: Settings | None = None, *, run_scheduler: bool = Tru
         try:
             file = _model_path(path)
             model = meshlib.load_mesh(file)
-            spec = spec_for(app.settings.get(printer).model if app.settings.printers else None)
+            spec = spec_for(app.settings.get(printer).model if app.settings.devices else None)
             advice = scale_advice(model, spec, target_mm, axis)
             if not apply:
                 advice["applied"] = False
@@ -711,8 +740,8 @@ def create_server(settings: Settings | None = None, *, run_scheduler: bool = Tru
                    printability=report.to_dict(), verdict=report.verdict())
 
     # ------------------------------------------------- measuring the result
-    def _calibration(printer_id: str) -> vision.ScaleCalibration | None:
-        stored = app.store.get_calibration(printer_id)
+    def _calibration(device_id: str) -> vision.ScaleCalibration | None:
+        stored = app.store.get_calibration(device_id)
         return vision.ScaleCalibration.from_dict(stored) if stored else None
 
     @server.tool()
@@ -726,11 +755,11 @@ def create_server(settings: Settings | None = None, *, run_scheduler: bool = Tru
         device = await _printer(printer)
         device.require(Capability.CAMERA_SNAPSHOT)
         frame = await device.snapshot()
-        raw = app.capture_path(device.printer_id, "grid-source")
+        raw = app.capture_path(device.device_id, "grid-source")
         raw.write_bytes(frame)
-        app.store.add_observation(device.printer_id, kind="snapshot", image_path=str(raw))
-        annotated = vision.annotate_grid(frame, grid_px, _calibration(device.printer_id))
-        app.capture_path(device.printer_id, "grid").with_suffix(".png").write_bytes(annotated)
+        app.store.add_observation(device.device_id, kind="snapshot", image_path=str(raw))
+        annotated = vision.annotate_grid(frame, grid_px, _calibration(device.device_id))
+        app.capture_path(device.device_id, "grid").with_suffix(".png").write_bytes(annotated)
         return Image(data=annotated, format="png")
 
     @server.tool()
@@ -751,9 +780,9 @@ def create_server(settings: Settings | None = None, *, run_scheduler: bool = Tru
         try:
             device = await _printer(printer)
             calibration = vision.calibrate(
-                reference, pixel_length, printer_id=device.printer_id, note=note
+                reference, pixel_length, device_id=device.device_id, note=note
             )
-            app.store.save_calibration(device.printer_id, calibration.to_dict())
+            app.store.save_calibration(device.device_id, calibration.to_dict())
         except MHSError as exc:
             return _fail(exc)
         return _ok(
@@ -781,7 +810,7 @@ def create_server(settings: Settings | None = None, *, run_scheduler: bool = Tru
         """
         try:
             device = await _printer(printer)
-            source = frame_path or app.store.latest_snapshot(device.printer_id)
+            source = frame_path or app.store.latest_snapshot(device.device_id)
             if not source or not Path(source).is_file():
                 return _fail(CommandRejected(
                     "no camera frame to measure",
@@ -790,11 +819,11 @@ def create_server(settings: Settings | None = None, *, run_scheduler: bool = Tru
                 ))
             if len(point_a) != 2 or len(point_b) != 2:
                 return _fail(CommandRejected("points must be [x, y] pixel pairs"))
-            calibration = _calibration(device.printer_id)
+            calibration = _calibration(device.device_id)
             annotated, pixels, millimetres = vision.annotate_measurement(
                 Path(source).read_bytes(), tuple(point_a), tuple(point_b), calibration, label
             )
-            out = app.capture_path(device.printer_id, "measure").with_suffix(".png")
+            out = app.capture_path(device.device_id, "measure").with_suffix(".png")
             out.write_bytes(annotated)
         except MHSError as exc:
             return _fail(exc)
@@ -825,7 +854,7 @@ def create_server(settings: Settings | None = None, *, run_scheduler: bool = Tru
 
     # ------------------------------------------------- MHS standard surface
     @server.tool()
-    async def describe_device(printer: str | None = None, as_markdown: bool = True) -> dict:
+    async def describe_device(device: str | None = None, as_markdown: bool = True) -> dict:
         """The device's MHS descriptor: what it is, what it exposes, what it refuses.
 
         Read this before operating an unfamiliar machine - it lists every
@@ -833,8 +862,8 @@ def create_server(settings: Settings | None = None, *, run_scheduler: bool = Tru
         can actually achieve, and what the device cannot do.
         """
         try:
-            device = await _printer(printer)
-            descriptor = await device.describe()
+            target = await app.device(device)
+            descriptor = await target.describe()
         except MHSError as exc:
             return _fail(exc)
         payload = {"descriptor": descriptor}
@@ -843,31 +872,31 @@ def create_server(settings: Settings | None = None, *, run_scheduler: bool = Tru
         return _ok(**payload)
 
     @server.tool()
-    async def list_channels(printer: str | None = None) -> dict:
+    async def list_channels(device: str | None = None) -> dict:
         """List the device's read/write channels with their units and limits."""
         try:
-            device = await _printer(printer)
-            return _ok(channels=device.channel_table().to_list())
+            target = await app.device(device)
+            return _ok(channels=target.channel_table().to_list())
         except MHSError as exc:
             return _fail(exc)
 
     @server.tool()
-    async def read_channel(channel: str, printer: str | None = None) -> dict:
+    async def read_channel(channel: str, device: str | None = None) -> dict:
         """Read one channel by name (the MHS read primitive), e.g. "nozzle.temperature"."""
         try:
-            device = await _printer(printer)
-            value = await device.read(channel)
+            target = await app.device(device)
+            value = await target.read(channel)
         except MHSError as exc:
             return _fail(exc)
-        entry = device.channel_table().get(channel)
+        entry = target.channel_table().get(channel)
         if entry.value_type == "binary":
             return _ok(channel=channel, value_type="binary", bytes=len(value),
-                       hint="Use capture_snapshot to see the image itself.")
+                       hint="Use capture_snapshot or get_map to see the image itself.")
         return _ok(channel=channel, value=value, unit=entry.unit)
 
     @server.tool()
     async def write_channel(
-        channel: str, value: Any, confirm: bool = False, printer: str | None = None
+        channel: str, value: Any, confirm: bool = False, device: str | None = None
     ) -> dict:
         """Write one channel by name (the MHS write primitive).
 
@@ -877,22 +906,358 @@ def create_server(settings: Settings | None = None, *, run_scheduler: bool = Tru
         """
         try:
             app.require_writable(f"write {channel}")
-            device = await _printer(printer)
-            result = await device.write(channel, value, confirm=confirm)
+            target = await app.device(device)
+            result = await target.write(channel, value, confirm=confirm)
         except MHSError as exc:
             return _fail(exc)
         return _ok(channel=channel, value=value, result=result)
 
+    # ------------------------------------------------------------- vacuums
+    async def _resolve_rooms(device: Vacuum, wanted: list) -> list[int]:
+        """Turn a mixed list of room names and segment ids into segment ids.
+
+        People say "the kitchen"; the robot only knows segment 16. Matching is
+        case-insensitive and accepts a partial name, because "kitchen" should
+        find "Kitchen" and "Main Kitchen".
+        """
+        rooms = await device.list_rooms()
+        by_id = {room.segment_id: room for room in rooms}
+        resolved: list[int] = []
+        for entry in wanted:
+            if isinstance(entry, int) or str(entry).strip().isdigit():
+                segment = int(entry)
+                if segment not in by_id:
+                    raise CommandRejected(
+                        f"no mapped room with segment id {segment}",
+                        hint="Rooms: " + _room_list(rooms),
+                    )
+                resolved.append(segment)
+                continue
+            text = str(entry).strip().lower()
+            matches = [r for r in rooms if r.name and r.name.strip().lower() == text]
+            if not matches:
+                matches = [r for r in rooms if r.name and text in r.name.strip().lower()]
+            if not matches:
+                raise CommandRejected(
+                    f"no mapped room called {entry!r}", hint="Rooms: " + _room_list(rooms)
+                )
+            if len(matches) > 1:
+                raise CommandRejected(
+                    f"{entry!r} matches several rooms: "
+                    + ", ".join(m.label for m in matches),
+                    hint="Name it exactly, or pass the segment id.",
+                )
+            resolved.append(matches[0].segment_id)
+        return resolved
+
+    def _room_list(rooms) -> str:
+        return ", ".join(f"{r.label} (id {r.segment_id})" for r in rooms) or "none mapped yet"
+
+    @server.tool()
+    async def vacuum_status(vacuum: str | None = None) -> dict:
+        """What the robot is doing: state, battery, suction, position, errors."""
+        try:
+            device = await _vacuum(vacuum)
+            status = await device.status()
+        except MHSError as exc:
+            return _fail(exc)
+        return _ok(summary=status.summary(), status=status.to_dict())
+
+    @server.tool()
+    async def list_rooms(vacuum: str | None = None) -> dict:
+        """The rooms the robot has mapped, with the segment ids used to clean them.
+
+        Names come from the Roborock app; a room the app has not named shows as
+        its segment id only.
+        """
+        try:
+            device = await _vacuum(vacuum)
+            rooms = await device.list_rooms()
+        except MHSError as exc:
+            return _fail(exc)
+        return _ok(rooms=[r.to_dict() for r in rooms], count=len(rooms))
+
+    @server.tool()
+    async def get_map(vacuum: str | None = None, save: bool = True) -> Image:
+        """The current map, with a millimetre grid, room names, robot and dock.
+
+        Read coordinates straight off the grid and pass them to `go_to` or
+        `clean_zone` - the labels are the robot's own frame, not pixels.
+        """
+        device = await _vacuum(vacuum)
+        device.require(Capability.MAP)
+        snapshot = await device.map_snapshot()
+        if save:
+            path = app.capture_path(device.device_id, "map").with_suffix(".png")
+            path.write_bytes(snapshot.image_png)
+            app.store.add_observation(device.device_id, kind="map", image_path=str(path))
+        return Image(data=snapshot.image_png, format="png")
+
+    @server.tool()
+    async def start_cleaning(
+        confirm: bool = False,
+        vacuum: str | None = None,
+        rooms: list[str] | None = None,
+        repeat: int = 1,
+        suction: str | None = None,
+        water: str | None = None,
+    ) -> dict:
+        """Start cleaning - the whole map, or just the rooms named in `rooms`.
+
+        `rooms` accepts names ("kitchen") or segment ids; `list_rooms` shows
+        both. Requires `confirm=True`.
+        """
+        if not confirm:
+            where = f"the {', '.join(rooms)}" if rooms else "the whole mapped area"
+            return {
+                "ok": False,
+                "error": "ConfirmationRequired",
+                "message": f"Would start cleaning {where}.",
+                "hint": "Call again with confirm=true.",
+            }
+        try:
+            app.require_writable("start cleaning")
+            device = await _vacuum(vacuum)
+            options = CleanOptions(repeat=repeat, fan_power=suction, water_level=water)
+            if rooms:
+                device.require(Capability.ROOM_CLEAN)
+                segments = await _resolve_rooms(device, rooms)
+                result = await device.clean_rooms(segments, options)
+                result["rooms"] = segments
+            else:
+                result = await device.start_clean(options)
+            run_id = app.store.start_run(
+                device.device_id,
+                job_name=", ".join(rooms) if rooms else "whole map",
+                settings=options.to_dict(),
+            )
+        except MHSError as exc:
+            return _fail(exc)
+        return _ok(result=result, run_id=run_id)
+
+    @server.tool()
+    async def go_to(
+        confirm: bool = False,
+        vacuum: str | None = None,
+        location: str | None = None,
+        x_mm: float | None = None,
+        y_mm: float | None = None,
+    ) -> dict:
+        """Send the robot to a point and have it stop there - it does not clean.
+
+        Give either a saved `location` name (see `save_location`), a room name,
+        or `x_mm`/`y_mm` read off `get_map`. Requires `confirm=True`.
+        """
+        try:
+            device = await _vacuum(vacuum)
+            target, label = await _resolve_point(device, location, x_mm, y_mm)
+        except MHSError as exc:
+            return _fail(exc)
+
+        if not confirm:
+            return {
+                "ok": False,
+                "error": "ConfirmationRequired",
+                "message": f"Would drive to {label} at ({target[0]:.0f}, {target[1]:.0f}) mm.",
+                "hint": "Call again with confirm=true.",
+            }
+        try:
+            app.require_writable("move the robot")
+            device.require(Capability.GO_TO)
+            result = await device.go_to(*target)
+        except MHSError as exc:
+            return _fail(exc)
+        return _ok(result=result, target={"x_mm": target[0], "y_mm": target[1], "label": label})
+
+    async def _resolve_point(
+        device: Vacuum, location: str | None, x_mm: float | None, y_mm: float | None
+    ) -> tuple[tuple[float, float], str]:
+        """A saved location, a room centre, or explicit coordinates - in that order."""
+        if x_mm is not None and y_mm is not None:
+            return (float(x_mm), float(y_mm)), "those coordinates"
+        if not location:
+            raise CommandRejected(
+                "give a location name or both x_mm and y_mm",
+                hint="Call get_map to read coordinates, or save_location to name a spot.",
+            )
+        saved = app.store.get_location(device.device_id, location)
+        if saved:
+            return (saved["x_mm"], saved["y_mm"]), f"saved location {location!r}"
+        rooms = await device.list_rooms()
+        text = location.strip().lower()
+        for room in rooms:
+            if room.name and text in room.name.strip().lower() and room.center:
+                return (room.center.x_mm, room.center.y_mm), f"the middle of {room.label}"
+        known = [entry["name"] for entry in app.store.list_locations(device.device_id)]
+        raise CommandRejected(
+            f"nothing called {location!r} is saved or mapped",
+            hint=f"Saved: {', '.join(known) or 'none'}. Rooms: {_room_list(rooms)}",
+        )
+
+    @server.tool()
+    async def clean_zone(
+        x1_mm: float, y1_mm: float, x2_mm: float, y2_mm: float,
+        confirm: bool = False, vacuum: str | None = None, repeat: int = 1,
+    ) -> dict:
+        """Clean one rectangle, given as two opposite corners in map millimetres.
+
+        Use it for a spill: read the corners off `get_map`. Requires `confirm=True`.
+        """
+        if not confirm:
+            return {
+                "ok": False,
+                "error": "ConfirmationRequired",
+                "message": f"Would clean the rectangle ({x1_mm:.0f}, {y1_mm:.0f}) to "
+                           f"({x2_mm:.0f}, {y2_mm:.0f}) mm.",
+                "hint": "Call again with confirm=true.",
+            }
+        try:
+            app.require_writable("start cleaning")
+            device = await _vacuum(vacuum)
+            device.require(Capability.ZONE_CLEAN)
+            result = await device.clean_zone(
+                [(x1_mm, y1_mm, x2_mm, y2_mm)], CleanOptions(repeat=repeat)
+            )
+        except MHSError as exc:
+            return _fail(exc)
+        return _ok(result=result)
+
+    @server.tool()
+    async def pause_cleaning(vacuum: str | None = None) -> dict:
+        """Pause the run. `resume_cleaning` picks it up where it stopped."""
+        try:
+            app.require_writable("pause the robot")
+            return _ok(result=await (await _vacuum(vacuum)).pause())
+        except MHSError as exc:
+            return _fail(exc)
+
+    @server.tool()
+    async def resume_cleaning(vacuum: str | None = None) -> dict:
+        """Resume a paused run."""
+        try:
+            app.require_writable("resume the robot")
+            return _ok(result=await (await _vacuum(vacuum)).resume())
+        except MHSError as exc:
+            return _fail(exc)
+
+    @server.tool()
+    async def stop_cleaning(confirm: bool = False, vacuum: str | None = None) -> dict:
+        """Stop the run and stay put. The job cannot be resumed afterwards."""
+        if not confirm:
+            return {
+                "ok": False,
+                "error": "ConfirmationRequired",
+                "message": "Stopping ends the run; it cannot be resumed.",
+                "hint": "Call again with confirm=true, or use pause_cleaning instead.",
+            }
+        try:
+            app.require_writable("stop the robot")
+            return _ok(result=await (await _vacuum(vacuum)).stop())
+        except MHSError as exc:
+            return _fail(exc)
+
+    @server.tool()
+    async def return_to_dock(vacuum: str | None = None) -> dict:
+        """Send the robot home to charge."""
+        try:
+            app.require_writable("send the robot to its dock")
+            device = await _vacuum(vacuum)
+            device.require(Capability.RETURN_TO_DOCK)
+            return _ok(result=await device.return_to_dock())
+        except MHSError as exc:
+            return _fail(exc)
+
+    @server.tool()
+    async def find_vacuum(vacuum: str | None = None) -> dict:
+        """Make the robot announce itself, for when it is stuck under something."""
+        try:
+            app.require_writable("make the robot speak")
+            device = await _vacuum(vacuum)
+            device.require(Capability.LOCATE)
+            return _ok(result=await device.locate())
+        except MHSError as exc:
+            return _fail(exc)
+
+    @server.tool()
+    async def set_suction(level: str, vacuum: str | None = None) -> dict:
+        """Set the suction preset. `vacuum_status` and the descriptor list the options."""
+        try:
+            app.require_writable("change suction")
+            device = await _vacuum(vacuum)
+            return _ok(result=await device.set_fan_power(level),
+                       options=list(device.fan_power_options))
+        except MHSError as exc:
+            return _fail(exc)
+
+    @server.tool()
+    async def set_water_flow(level: str, vacuum: str | None = None) -> dict:
+        """Set the mop's water flow."""
+        try:
+            app.require_writable("change water flow")
+            device = await _vacuum(vacuum)
+            return _ok(result=await device.set_water_level(level),
+                       options=list(device.water_level_options))
+        except MHSError as exc:
+            return _fail(exc)
+
+    @server.tool()
+    async def save_location(
+        name: str, x_mm: float, y_mm: float, vacuum: str | None = None, note: str | None = None
+    ) -> dict:
+        """Remember a point by name, so it can be reused with `go_to`.
+
+        Coordinates come from `get_map`. Useful for the spots a map has no name
+        for: under the dining table, the cat's water bowl, the back door.
+        """
+        try:
+            device = await _vacuum(vacuum)
+            saved = app.store.save_location(device.device_id, name, x_mm, y_mm, note)
+        except (MHSError, ValueError) as exc:
+            return _fail(exc) if isinstance(exc, MHSError) else _fail(CommandRejected(str(exc)))
+        return _ok(location=saved)
+
+    @server.tool()
+    async def list_locations(vacuum: str | None = None) -> dict:
+        """Saved points for this robot."""
+        try:
+            device = await _vacuum(vacuum)
+        except MHSError as exc:
+            return _fail(exc)
+        return _ok(locations=app.store.list_locations(device.device_id))
+
+    @server.tool()
+    async def delete_location(name: str, vacuum: str | None = None) -> dict:
+        """Forget a saved point."""
+        try:
+            device = await _vacuum(vacuum)
+        except MHSError as exc:
+            return _fail(exc)
+        if not app.store.delete_location(device.device_id, name):
+            return {"ok": False, "error": "NotFound", "message": f"no saved location {name!r}"}
+        return _ok(deleted=name)
+
     # ------------------------------------------------------------- resources
+    @server.resource("mhs://devices", mime_type="application/json")
+    async def devices_resource() -> dict:
+        """Every configured device."""
+        return await list_devices()
+
     @server.resource("mhs://printers", mime_type="application/json")
     async def printers_resource() -> dict:
-        """Configured printers."""
-        return await list_printers()
+        """Previous spelling of mhs://devices."""
+        return await list_devices()
 
-    @server.resource("mhs://printer/{printer_id}/status", mime_type="application/json")
-    async def status_resource(printer_id: str) -> dict:
+    @server.resource("mhs://device/{device_id}/status", mime_type="application/json")
+    async def device_status_resource(device_id: str) -> dict:
+        """Live status of one device, whatever kind it is."""
+        target = await app.device(device_id)
+        status = await target.status()
+        return _ok(summary=status.summary(), status=status.to_dict())
+
+    @server.resource("mhs://printer/{device_id}/status", mime_type="application/json")
+    async def status_resource(device_id: str) -> dict:
         """Live status of one printer."""
-        return await get_status(printer_id)
+        return await get_status(device_id)
 
     @server.resource("mhs://reference-objects", mime_type="application/json")
     async def reference_objects_resource() -> dict:
@@ -906,15 +1271,20 @@ def create_server(settings: Settings | None = None, *, run_scheduler: bool = Tru
                      "then camera_calibrate(reference=<name>, pixel_length=<px>).",
         }
 
-    @server.resource("mhs://printer/{printer_id}/descriptor", mime_type="application/json")
-    async def descriptor_resource(printer_id: str) -> dict:
-        """MHS device descriptor for one printer."""
-        return await describe_device(printer_id, as_markdown=False)
+    @server.resource("mhs://device/{device_id}/descriptor", mime_type="application/json")
+    async def descriptor_resource(device_id: str) -> dict:
+        """MHS device descriptor for one device."""
+        return await describe_device(device_id, as_markdown=False)
 
-    @server.resource("mhs://printer/{printer_id}/history", mime_type="application/json")
-    async def history_resource(printer_id: str) -> dict:
+    @server.resource("mhs://printer/{device_id}/descriptor", mime_type="application/json")
+    async def printer_descriptor_resource(device_id: str) -> dict:
+        """Previous spelling of mhs://device/{id}/descriptor."""
+        return await describe_device(device_id, as_markdown=False)
+
+    @server.resource("mhs://printer/{device_id}/history", mime_type="application/json")
+    async def history_resource(device_id: str) -> dict:
         """Recent prints on one printer."""
-        return await list_print_history(printer_id)
+        return await list_print_history(device_id)
 
     # --------------------------------------------------------------- prompts
     @server.prompt()

@@ -72,7 +72,7 @@ class ScaleCalibration:
     reference_name: str
     reference_mm: float
     pixel_length: float
-    printer_id: str | None = None
+    device_id: str | None = None
     note: str | None = None
     created_at: float = 0.0
 
@@ -123,7 +123,7 @@ def calibrate(
     reference: str | float,
     pixel_length: float,
     *,
-    printer_id: str | None = None,
+    device_id: str | None = None,
     note: str | None = None,
 ) -> ScaleCalibration:
     """Derive mm-per-pixel from a known object measured in pixels."""
@@ -135,7 +135,7 @@ def calibrate(
         reference_name=label,
         reference_mm=reference_mm,
         pixel_length=float(pixel_length),
-        printer_id=printer_id,
+        device_id=device_id,
         note=note,
     )
 

@@ -72,7 +72,7 @@ async def test_read_returns_live_values(printer):
     assert await printer.read("printer.state") == "idle"
     assert await printer.read("nozzle.temperature") == 25.0
     status = await printer.read("printer.status")
-    assert status["printer_id"] == "mock"
+    assert status["device_id"] == "mock"
 
 
 async def test_reading_a_write_only_channel_fails(printer):

@@ -5,12 +5,16 @@ build-backend = "hatchling.build"
 [project]
 name = "mhs-printer"
 version = "0.1.0"
-description = "An MHS-aligned MCP server and driver layer that lets Claude drive, measure and design for 3D printers (Bambu Lab A1 mini and friends)"
+description = "An MHS-aligned MCP server and driver layer that lets Claude operate physical devices: Bambu Lab 3D printers and Roborock robot vacuums"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { file = "LICENSE" }
 authors = [{ name = "zhenwei2972" }]
-keywords = ["mcp", "mhs", "model-hardware-standard", "3d-printing", "bambu-lab", "a1-mini", "claude"]
+keywords = [
+  "mcp", "mhs", "model-hardware-standard", "claude",
+  "3d-printing", "bambu-lab", "a1-mini",
+  "roborock", "saros", "robot-vacuum", "home-automation",
+]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Intended Audience :: Developers",
@@ -27,7 +31,14 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "pytest-asyncio>=0.24", "ruff>=0.6"]
+# The Roborock protocol (four wire versions, AES-ECB/CBC/GCM, a compressed map
+# format) is implemented by python-roborock rather than here; it is an extra so
+# a printer-only install does not pull aiohttp, protobuf and pyshark.
+roborock = ["python-roborock>=7.8", "vacuum-map-parser-roborock>=0.1.2"]
+dev = [
+  "pytest>=8", "pytest-asyncio>=0.24", "ruff>=0.6",
+  "python-roborock>=7.8", "aioresponses>=0.7",
+]
 
 [project.scripts]
 mhs = "mhs.cli:main"

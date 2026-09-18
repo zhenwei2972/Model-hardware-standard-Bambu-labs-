@@ -50,7 +50,7 @@ def test_listing_filters(store):
     store.add_job("a1", "one.3mf", time.time())
     other = store.add_job("p1s", "two.3mf", time.time())
     store.update_job(other.id, status="done")
-    assert [j.remote_path for j in store.list_jobs(printer_id="a1")] == ["one.3mf"]
+    assert [j.remote_path for j in store.list_jobs(device_id="a1")] == ["one.3mf"]
     assert [j.remote_path for j in store.list_jobs(status="done")] == ["two.3mf"]
 
 

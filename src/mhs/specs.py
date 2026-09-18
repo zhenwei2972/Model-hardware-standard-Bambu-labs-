@@ -171,3 +171,88 @@ def limits_for(
         nozzle_mm=nozzle_mm or spec.default_nozzle_mm,
         layer_height_mm=layer_height_mm or spec.default_layer_height_mm,
     )
+
+
+# ---------------------------------------------------------------- vacuums
+@dataclass(frozen=True)
+class VacuumSpec:
+    """What a robot vacuum is, physically.
+
+    Unlike :class:`PrinterSpec`, nothing here feeds a calculation - a vacuum's
+    behaviour is not derived from published figures. It exists so the MHS
+    descriptor can tell an agent what kind of machine it is talking to. The
+    authoritative source for anything operational (suction presets, water
+    levels, room list) is the device itself.
+    """
+
+    model: str
+    suction_pa: int | None = None
+    navigation: str | None = None
+    mop_type: str | None = None
+    has_arm: bool = False
+    height_mm: float | None = None
+    max_threshold_mm: float | None = None
+    notes: tuple[str, ...] = ()
+
+    def to_dict(self) -> dict:
+        data = asdict(self)
+        data["notes"] = list(self.notes)
+        return data
+
+
+SAROS_10 = VacuumSpec(
+    model="Saros 10",
+    suction_pa=22000,
+    navigation="retractable LiDAR (RetractSense)",
+    mop_type="VibraRise 4.0 single vibrating pad",
+    height_mm=79.8,
+    notes=(
+        "The LiDAR retracts, so it can work under low furniture.",
+        "Cleaning happens on the robot; commands are requests, and it may refuse "
+        "or defer them when docked, low on battery or mid-error.",
+    ),
+)
+
+SAROS_10R = VacuumSpec(
+    model="Saros 10R",
+    suction_pa=19000,
+    navigation="StarSight 2.0 (solid state, towerless)",
+    mop_type="dual spinning pads",
+    height_mm=79.8,
+    notes=("No LiDAR tower: obstacle handling is camera and time-of-flight based.",),
+)
+
+SAROS_Z70 = VacuumSpec(
+    model="Saros Z70",
+    suction_pa=22000,
+    navigation="StarSight 2.0 with VertiBeam",
+    mop_type="dual spinning pads",
+    has_arm=True,
+    height_mm=79.8,
+    notes=(
+        "Has the OmniGrip robotic arm, which can pick up small objects. The arm is "
+        "not exposed by this driver.",
+    ),
+)
+
+VACUUM_SPECS: dict[str, VacuumSpec] = {
+    "saros 10": SAROS_10,
+    "saros 10r": SAROS_10R,
+    "saros z70": SAROS_Z70,
+    "saros r10": SAROS_10R,
+}
+
+GENERIC_VACUUM = VacuumSpec(model="robot vacuum")
+
+
+def vacuum_spec_for(model: str | None) -> VacuumSpec:
+    """Look up a vacuum spec by model name, tolerantly."""
+    if not model:
+        return GENERIC_VACUUM
+    key = " ".join(model.lower().replace("-", " ").replace("_", " ").split())
+    if key in VACUUM_SPECS:
+        return VACUUM_SPECS[key]
+    for name, spec in VACUUM_SPECS.items():
+        if name in key:
+            return spec
+    return GENERIC_VACUUM

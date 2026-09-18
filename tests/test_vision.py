@@ -69,10 +69,10 @@ def test_calibration_converts_pixels_to_millimetres():
 
 
 def test_calibration_round_trips_through_a_dict_without_losing_precision():
-    cal = calibrate("sgd_1", 88, printer_id="a1", note="coin on the plate")
+    cal = calibrate("sgd_1", 88, device_id="a1", note="coin on the plate")
     restored = ScaleCalibration.from_dict(cal.to_dict())
     assert restored.mm_per_pixel == cal.mm_per_pixel
-    assert restored.printer_id == "a1" and restored.note == "coin on the plate"
+    assert restored.device_id == "a1" and restored.note == "coin on the plate"
 
 
 @pytest.mark.parametrize("bad", [0, -20])

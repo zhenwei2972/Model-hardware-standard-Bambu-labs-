@@ -76,9 +76,9 @@ def test_doctor_reports_all_transports(cli_env, capsys):
     assert "telemetry" in out and "camera" in out and "all good" in out
 
 
-def test_unknown_printer_is_a_clean_error(cli_env, capsys):
+def test_unknown_device_is_a_clean_error(cli_env, capsys):
     assert run(["--printer", "ghost", "status"]) == 1
-    assert "unknown printer" in capsys.readouterr().err
+    assert "unknown device" in capsys.readouterr().err
 
 
 def test_parser_exposes_every_command():
@@ -169,3 +169,88 @@ def test_grid_calibrate_measure_flow(cli_env, capsys):
 def test_measure_without_a_frame_fails_cleanly(cli_env, capsys):
     assert run(["measure", "0", "0", "10", "0"]) == 1
     assert "mhs grid" in capsys.readouterr().err
+
+
+# -- vacuum commands ---------------------------------------------------------
+@pytest.fixture
+def vacuum_cli(tmp_path, monkeypatch):
+    config = tmp_path / "config.toml"
+    config.write_text(
+        '[server]\ndefault_device = "saros"\n\n'
+        '[devices.saros]\ndriver = "mock_vacuum"\nmodel = "Saros 10"\n'
+    )
+    monkeypatch.setenv("MHS_CONFIG", str(config))
+    monkeypatch.setenv("MHS_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.delenv("MHS_MOCK", raising=False)
+    monkeypatch.chdir(tmp_path)
+
+
+def test_vacuum_status(vacuum_cli, capsys):
+    assert run(["vacuum"]) == 0
+    assert "saros: docked" in capsys.readouterr().out
+
+
+def test_rooms_lists_names_and_ids(vacuum_cli, capsys):
+    assert run(["rooms"]) == 0
+    out = capsys.readouterr().out
+    assert "Kitchen" in out and "16" in out
+
+
+def test_clean_a_room_by_name(vacuum_cli, capsys):
+    assert run(["clean", "kitchen", "-y"]) == 0
+    out = capsys.readouterr().out
+    assert '"segments"' in out and "16" in out
+
+
+def test_clean_rejects_an_unmapped_room(vacuum_cli, capsys):
+    assert run(["clean", "bathroom", "-y"]) == 1
+    assert "no mapped room" in capsys.readouterr().err
+
+
+def test_goto_saved_location_round_trip(vacuum_cli, capsys):
+    """The saved point survives between invocations, even though the mock robot does not."""
+    assert run(["locations", "--save", "dog bowl", "24200", "26200"]) == 0
+    capsys.readouterr()
+    assert run(["goto", "dog bowl", "-y"]) == 0
+    out = capsys.readouterr().out
+    assert '"x_mm": 24200' in out and '"y_mm": 26200' in out
+
+
+def test_goto_a_room_centre(vacuum_cli, capsys):
+    assert run(["goto", "bedroom", "-y"]) == 0
+    assert '"command": "go_to"' in capsys.readouterr().out
+
+
+def test_goto_needs_a_target(vacuum_cli, capsys):
+    assert run(["goto"]) == 1
+    assert "location name" in capsys.readouterr().err
+
+
+def test_goto_unknown_place(vacuum_cli, capsys):
+    assert run(["goto", "atlantis", "-y"]) == 1
+    assert "nothing called" in capsys.readouterr().err
+
+
+def test_map_writes_a_png_and_lists_room_centres(vacuum_cli, capsys, tmp_path):
+    target = tmp_path / "map.png"
+    assert run(["map", "-o", str(target)]) == 0
+    assert target.read_bytes().startswith(b"\x89PNG")
+    assert "Kitchen" in capsys.readouterr().out
+
+
+def test_dock(vacuum_cli, capsys):
+    assert run(["dock"]) == 0
+    assert '"command": "dock"' in capsys.readouterr().out
+
+
+def test_locations_forget(vacuum_cli, capsys):
+    run(["locations", "--save", "corner", "24000", "24000"])
+    capsys.readouterr()
+    assert run(["locations", "--forget", "corner"]) == 0
+    assert run(["locations", "--forget", "corner"]) == 1
+
+
+def test_printer_commands_refuse_a_vacuum(vacuum_cli, capsys):
+    assert run(["status"]) == 1
+    err = capsys.readouterr().err
+    assert "not a printer" in err and "vacuum commands" in err
