@@ -85,3 +85,87 @@ def test_parser_exposes_every_command():
     parser = cli.build_parser()
     actions = [a for a in parser._actions if a.dest == "command"]
     assert {"status", "print", "schedule", "doctor", "serve", "scheduler"} <= set(actions[0].choices)
+
+
+# -- design and standard commands -------------------------------------------
+@pytest.fixture
+def ball(tmp_path):
+    from mhs.design.mesh import save_stl, uv_sphere
+
+    return str(save_stl(uv_sphere(25, 32, 24), tmp_path / "ball.stl"))
+
+
+def test_inspect_prints_dimensions_and_findings(cli_env, capsys, ball):
+    assert run(["inspect", ball]) == 0
+    out = capsys.readouterr().out
+    assert "50.00 x 50.00 x 50.00 mm" in out
+    assert "resolves about 0.4 mm in XY" in out
+
+
+def test_inspect_exits_nonzero_when_unprintable(cli_env, capsys, tmp_path):
+    from mhs.design.mesh import save_stl, unit_cube
+
+    path = str(save_stl(unit_cube(300), tmp_path / "huge.stl"))
+    assert run(["inspect", path]) == 2
+    assert "build volume" in capsys.readouterr().out
+
+
+def test_preview_writes_a_png(cli_env, capsys, ball, tmp_path):
+    target = tmp_path / "preview.png"
+    assert run(["preview", ball, "-o", str(target), "--views", "iso", "--size", "160"]) == 0
+    assert target.read_bytes().startswith(b"\x89PNG")
+
+
+def test_scale_dry_run_then_apply(cli_env, capsys, ball, tmp_path):
+    assert run(["scale", ball, "24.65"]) == 0
+    assert "dry run" in capsys.readouterr().out
+
+    target = tmp_path / "small.stl"
+    assert run(["scale", ball, "24.65", "--apply", "-o", str(target)]) == 0
+    from mhs.design.mesh import load_mesh
+
+    assert load_mesh(target).dimensions.max() == pytest.approx(24.65, rel=1e-3)
+
+
+def test_describe_prints_the_reference_sheet(cli_env, capsys):
+    assert run(["describe"]) == 0
+    out = capsys.readouterr().out
+    assert "## Channels" in out and "nozzle.temperature" in out
+
+
+def test_channels_read_and_write(cli_env, capsys):
+    assert run(["channels"]) == 0
+    assert "nozzle.temperature" in capsys.readouterr().out
+    assert run(["read", "printer.state"]) == 0
+    assert "idle" in capsys.readouterr().out
+    assert run(["write", "nozzle.temperature", "205"]) == 0
+
+
+def test_write_refuses_an_out_of_range_value(cli_env, capsys):
+    assert run(["write", "nozzle.temperature", "400"]) == 1
+    assert "exceeds the safe maximum" in capsys.readouterr().err
+
+
+def test_write_requires_confirmation_for_physical_actions(cli_env, capsys):
+    assert run(["write", "job.control", "pause"]) == 1
+    assert "requires confirmation" in capsys.readouterr().err
+
+
+def test_grid_calibrate_measure_flow(cli_env, capsys):
+    assert run(["grid"]) == 0
+    assert capsys.readouterr().out.strip().endswith(".png")
+
+    assert run(["measure", "0", "0", "100", "0"]) == 0
+    assert "uncalibrated" in capsys.readouterr().out
+
+    assert run(["calibrate", "sgd_1", "100"]) == 0
+    assert "0.24650 mm/px" in capsys.readouterr().out
+
+    assert run(["measure", "0", "0", "200", "0", "--target", "49.3"]) == 0
+    out = capsys.readouterr().out
+    assert "49.30 mm" in out and '"error_percent": 0.0' in out
+
+
+def test_measure_without_a_frame_fails_cleanly(cli_env, capsys):
+    assert run(["measure", "0", "0", "10", "0"]) == 1
+    assert "mhs grid" in capsys.readouterr().err

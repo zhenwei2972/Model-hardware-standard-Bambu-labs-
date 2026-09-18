@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import json
 import logging
 import socket
@@ -19,9 +20,16 @@ from pathlib import Path
 from . import __version__
 from .app import MHSApp
 from .config import load_settings
+from .design import mesh as meshlib
+from .design import vision
+from .design.printability import analyze as analyze_print
+from .design.printability import scale_advice
+from .design.render import render_to_png
 from .errors import MHSError
 from .models import PrintOptions
 from .scheduler import parse_when
+from .specs import spec_for
+from .standard.descriptor import descriptor_markdown
 from .store import iso
 
 
@@ -240,6 +248,153 @@ async def cmd_doctor(app, args) -> int:
     return 0 if ok else 1
 
 
+# -- model-side commands ---------------------------------------------------
+async def cmd_inspect(app, args) -> int:
+    model = meshlib.load_mesh(args.path)
+    spec = spec_for(app.settings.get(args.printer).model if app.settings.printers else None)
+    report = analyze_print(model, spec, nozzle_mm=args.nozzle, layer_height_mm=args.layer_height)
+    if args.json:
+        _print_json({"model": model.summary(), "printability": report.to_dict()})
+        return 0 if report.printable else 2
+
+    dims = model.dimensions
+    print(f"{Path(args.path).name}: {dims[0]:.2f} x {dims[1]:.2f} x {dims[2]:.2f} mm, "
+          f"{model.volume_mm3 / 1000:.2f} cm3, {model.triangle_count:,} triangles"
+          f"{'' if model.is_watertight() else ', NOT watertight'}")
+    print(report.verdict())
+    for finding in report.findings:
+        marker = {"blocker": "!!", "warning": " !", "note": "  "}[finding.severity]
+        print(f" {marker} {finding.message}")
+        if finding.suggestion:
+            print(f"      -> {finding.suggestion}")
+    return 0 if report.printable else 2
+
+
+async def cmd_preview(app, args) -> int:
+    model = meshlib.load_mesh(args.path)
+    target = Path(args.output) if args.output else (
+        app.settings.capture_dir / "models" / f"{Path(args.path).stem}-preview.png"
+    )
+    render_to_png(model, target, views=tuple(args.views), size=args.size,
+                  title=args.title or Path(args.path).name)
+    print(target)
+    return 0
+
+
+async def cmd_scale(app, args) -> int:
+    model = meshlib.load_mesh(args.path)
+    spec = spec_for(app.settings.get(args.printer).model if app.settings.printers else None)
+    advice = scale_advice(model, spec, args.target_mm, args.axis)
+    print(f"{advice['factor']:.4f}x -> "
+          f"{advice['dimensions_after_mm'][0]:.2f} x {advice['dimensions_after_mm'][1]:.2f} x "
+          f"{advice['dimensions_after_mm'][2]:.2f} mm, ~{advice['estimated_mass_g_after']:.1f} g")
+    print(advice["note"])
+    if not args.apply:
+        print("(dry run - pass --apply to write the scaled STL)")
+        return 0
+    scaled, _factor = model.scale_to_dimension(args.target_mm, args.axis)
+    target = Path(args.output) if args.output else (
+        app.settings.capture_dir / "models" / f"{Path(args.path).stem}-{args.target_mm:g}mm.stl"
+    )
+    print(meshlib.save_stl(scaled, target))
+    return 0
+
+
+# -- MHS standard commands -------------------------------------------------
+async def cmd_describe(app, args) -> int:
+    printer = await app.printer(args.printer)
+    descriptor = await printer.describe()
+    if args.json:
+        _print_json(descriptor)
+    else:
+        print(descriptor_markdown(descriptor))
+    if args.output:
+        Path(args.output).write_text(
+            json.dumps(descriptor, indent=2) if args.json else descriptor_markdown(descriptor)
+        )
+    return 0
+
+
+async def cmd_channels(app, args) -> int:
+    printer = await app.printer(args.printer)
+    for channel in printer.channel_table().to_list():
+        limit = channel["limit"]
+        bounds = ""
+        if limit and limit["allowed"]:
+            bounds = " [" + "|".join(limit["allowed"]) + "]"
+        elif limit and (limit["minimum"] is not None or limit["maximum"] is not None):
+            bounds = f" [{limit['minimum']}..{limit['maximum']}]"
+        print(f"{channel['name']:<22} {channel['access']:<11} {channel['unit'] or '':<8}{bounds}")
+    return 0
+
+
+async def cmd_read(app, args) -> int:
+    printer = await app.printer(args.printer)
+    value = await printer.read(args.channel)
+    _print_json(value if not isinstance(value, bytes) else {"bytes": len(value)})
+    return 0
+
+
+async def cmd_write(app, args) -> int:
+    printer = await app.printer(args.printer)
+    # Numbers arrive as strings on the command line; channels that want text
+    # (job.control, light.chamber) keep it.
+    value: object = args.value
+    with contextlib.suppress(ValueError):
+        value = float(args.value)
+    _print_json(await printer.write(args.channel, value, confirm=args.yes))
+    return 0
+
+
+# -- camera measurement commands -------------------------------------------
+async def cmd_grid(app, args) -> int:
+    printer = await app.printer(args.printer)
+    frame = await printer.snapshot()
+    raw = app.capture_path(printer.printer_id, "grid-source")
+    raw.write_bytes(frame)
+    app.store.add_observation(printer.printer_id, kind="snapshot", image_path=str(raw))
+    stored = app.store.get_calibration(printer.printer_id)
+    calibration = vision.ScaleCalibration.from_dict(stored) if stored else None
+    target = Path(args.output) if args.output else (
+        app.capture_path(printer.printer_id, "grid").with_suffix(".png")
+    )
+    target.write_bytes(vision.annotate_grid(frame, args.step, calibration))
+    print(target)
+    return 0
+
+
+async def cmd_calibrate(app, args) -> int:
+    printer = await app.printer(args.printer)
+    calibration = vision.calibrate(args.reference, args.pixels, printer_id=printer.printer_id)
+    app.store.save_calibration(printer.printer_id, calibration.to_dict())
+    print(f"{calibration.mm_per_pixel:.5f} mm/px via {calibration.reference_name} "
+          f"({calibration.reference_mm} mm over {args.pixels:g} px)")
+    print(vision.ACCURACY_CAVEAT)
+    return 0
+
+
+async def cmd_measure(app, args) -> int:
+    printer = await app.printer(args.printer)
+    source = args.frame or app.store.latest_snapshot(printer.printer_id)
+    if not source or not Path(source).is_file():
+        print("no camera frame yet - run `mhs grid` first", file=sys.stderr)
+        return 1
+    stored = app.store.get_calibration(printer.printer_id)
+    calibration = vision.ScaleCalibration.from_dict(stored) if stored else None
+    annotated, pixels, millimetres = vision.annotate_measurement(
+        Path(source).read_bytes(), (args.x1, args.y1), (args.x2, args.y2), calibration
+    )
+    out = app.capture_path(printer.printer_id, "measure").with_suffix(".png")
+    out.write_bytes(annotated)
+    if millimetres is None:
+        print(f"{pixels:.1f} px (uncalibrated - run `mhs calibrate` first) -> {out}")
+        return 0
+    print(f"{pixels:.1f} px = {millimetres:.2f} mm -> {out}")
+    if args.target:
+        _print_json(vision.compare_to_target(millimetres, args.target))
+    return 0
+
+
 def _probe(host: str, port: int, timeout: float = 3.0) -> bool:
     try:
         with socket.create_connection((host, port), timeout=timeout):
@@ -325,6 +480,56 @@ def build_parser() -> argparse.ArgumentParser:
     p = add("history", cmd_history, "past prints and their recorded outcomes")
     p.add_argument("--limit", type=int, default=20)
     p.add_argument("--json", action="store_true")
+
+    p = add("inspect", cmd_inspect, "measure a mesh and check it against the printer")
+    p.add_argument("path")
+    p.add_argument("--nozzle", type=float)
+    p.add_argument("--layer-height", type=float)
+    p.add_argument("--json", action="store_true")
+
+    p = add("preview", cmd_preview, "render a mesh to a PNG contact sheet")
+    p.add_argument("path")
+    p.add_argument("-o", "--output")
+    p.add_argument("--views", nargs="+", default=["iso", "front", "right", "top"])
+    p.add_argument("--size", type=int, default=420)
+    p.add_argument("--title")
+
+    p = add("scale", cmd_scale, "resize a mesh to a target dimension")
+    p.add_argument("path")
+    p.add_argument("target_mm", type=float)
+    p.add_argument("--axis", default="max", choices=["x", "y", "z", "max", "min"])
+    p.add_argument("--apply", action="store_true", help="write the scaled STL")
+    p.add_argument("-o", "--output")
+
+    p = add("describe", cmd_describe, "print the MHS device descriptor")
+    p.add_argument("--json", action="store_true")
+    p.add_argument("-o", "--output")
+
+    add("channels", cmd_channels, "list the device's read/write channels")
+
+    p = add("read", cmd_read, "read one channel")
+    p.add_argument("channel")
+
+    p = add("write", cmd_write, "write one channel")
+    p.add_argument("channel")
+    p.add_argument("value")
+    p.add_argument("-y", "--yes", action="store_true", help="confirm a physical action")
+
+    p = add("grid", cmd_grid, "capture a frame with a pixel grid overlaid")
+    p.add_argument("--step", type=int, default=80)
+    p.add_argument("-o", "--output")
+
+    p = add("calibrate", cmd_calibrate, "set mm-per-pixel from a known object")
+    p.add_argument("reference", help="e.g. sgd_1, usd_quarter, or a size in mm")
+    p.add_argument("pixels", type=float)
+
+    p = add("measure", cmd_measure, "measure between two pixel coordinates")
+    p.add_argument("x1", type=float)
+    p.add_argument("y1", type=float)
+    p.add_argument("x2", type=float)
+    p.add_argument("y2", type=float)
+    p.add_argument("--target", type=float, help="intended size in mm, to compare against")
+    p.add_argument("--frame", help="measure a specific saved frame")
 
     add("scheduler", cmd_scheduler, "run the scheduler in the foreground")
     add("doctor", cmd_doctor, "check every transport and explain what is broken")

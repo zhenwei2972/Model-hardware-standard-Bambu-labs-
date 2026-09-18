@@ -64,7 +64,7 @@ class BambuPrinter(Printer):
     driver_name = "bambu"
 
     def __init__(self, config: PrinterConfig) -> None:
-        super().__init__(config.printer_id)
+        super().__init__(config.printer_id, config.model)
         self.config = config
         self.state = BambuState(config.printer_id)
         self._mqtt = BambuMqtt(

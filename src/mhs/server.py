@@ -25,10 +25,17 @@ from mcp.server.mcpserver.exceptions import ToolError
 
 from .app import MHSApp
 from .config import Settings, load_settings
+from .design import mesh as meshlib
+from .design import vision
+from .design.printability import analyze as analyze_print
+from .design.printability import scale_advice
+from .design.render import render_to_png
 from .device import Printer
 from .errors import CommandRejected, MHSError, NotSupported
 from .models import Capability, PrintOptions
 from .scheduler import parse_when
+from .specs import spec_for
+from .standard.descriptor import descriptor_markdown
 
 log = logging.getLogger(__name__)
 
@@ -37,6 +44,11 @@ Control and observe 3D printers (Bambu Lab A1 mini / A1 / P1 / X1 over the LAN).
 
 Typical flows:
 * Check on a print: `get_status`, then `capture_snapshot` to actually look at it.
+* Design loop: `analyze_model` -> `preview_model` (look at it) -> `scale_model` ->
+  print -> `camera_grid` + `camera_measure` to check the result against the model.
+* Size something against a real object: put a coin on the plate, `camera_grid`,
+  read the coin's span in pixels off the grid, `camera_calibrate`, then
+  `camera_measure` anything else in that frame.
 * Print something already sliced: `upload_and_print(local_path=..., confirm=True)`.
 * Print later: `schedule_print(file=..., when="2026-09-19T06:30")` - the job only
   fires while the printer is idle, and expires if the window passes.
@@ -44,7 +56,10 @@ Typical flows:
   `list_print_history` to compare what worked.
 
 Constraints worth knowing before you act:
-* Files must be sliced (.3mf/.gcode) already; this server does not slice.
+* Files must be sliced (.3mf/.gcode) already; this server does not slice. The
+  design tools work on .stl/.obj/.3mf meshes and stop at "ready to slice".
+* Camera measurements are estimates from an off-axis camera: good to a few
+  percent with a reference object in the same plane, not caliper-grade.
 * Physical actions need `confirm=True`.
 * If commands come back `acknowledged: false`, the printer is almost certainly
   in cloud mode: LAN Only Mode + Developer Mode must be enabled on its screen.
@@ -587,6 +602,287 @@ def create_server(settings: Settings | None = None, *, run_scheduler: bool = Tru
             )
         return _ok(**report)
 
+    # ----------------------------------------------------------- the model
+    def _model_path(path: str) -> Path:
+        file = Path(path).expanduser()
+        if not file.is_file():
+            raise CommandRejected(f"{path} does not exist")
+        if file.suffix.lower() not in meshlib.SUPPORTED_SUFFIXES:
+            raise CommandRejected(
+                f"{file.suffix} is not a mesh format",
+                hint=f"Supported: {', '.join(meshlib.SUPPORTED_SUFFIXES)}",
+            )
+        return file
+
+    @server.tool()
+    async def analyze_model(
+        path: str,
+        printer: str | None = None,
+        nozzle_mm: float | None = None,
+        layer_height_mm: float | None = None,
+        material: str = "PLA",
+    ) -> dict:
+        """Measure a mesh and judge it against what the printer can actually resolve.
+
+        Returns its dimensions and volume, plus findings: does it fit, which
+        detail is finer than the extrusion width, thin walls, overhangs needing
+        support, bed contact, layer count, estimated filament. Use it before
+        slicing, and again after `scale_model` - shrinking a model is exactly
+        when detail stops being printable.
+        """
+        try:
+            model = meshlib.load_mesh(_model_path(path))
+            spec = spec_for(app.settings.get(printer).model if app.settings.printers else None)
+            report = analyze_print(
+                model, spec, nozzle_mm=nozzle_mm, layer_height_mm=layer_height_mm, material=material
+            )
+        except MHSError as exc:
+            return _fail(exc)
+        return _ok(model=model.summary(), printability=report.to_dict(), verdict=report.verdict())
+
+    @server.tool()
+    async def preview_model(
+        path: str,
+        views: list[str] | None = None,
+        title: str | None = None,
+        size: int = 420,
+    ) -> Image:
+        """Render a mesh so you can look at it before printing.
+
+        Orthographic views at a shared scale with a millimetre scale bar; faces
+        that overhang more than 45 degrees are tinted red. Views: iso, front,
+        back, left, right, top, bottom. Overhangs are only visible from below,
+        so pass ["bottom", "iso"] when checking supports.
+        """
+        file = _model_path(path)
+        model = meshlib.load_mesh(file)
+        chosen = tuple(views) if views else ("iso", "front", "right", "top")
+        try:
+            data = render_to_png(
+                model,
+                path=app.settings.capture_dir / "models" / f"{file.stem}-preview.png",
+                views=chosen,
+                size=max(160, min(size, 900)),
+                title=title or f"{file.name}  -  {model.dimensions[0]:.1f} x "
+                               f"{model.dimensions[1]:.1f} x {model.dimensions[2]:.1f} mm",
+            )
+        except ValueError as exc:
+            raise ToolError(str(exc)) from exc
+        return Image(data=data, format="png")
+
+    @server.tool()
+    async def scale_model(
+        path: str,
+        target_mm: float,
+        axis: str = "max",
+        apply: bool = False,
+        output_path: str | None = None,
+        printer: str | None = None,
+    ) -> dict:
+        """Resize a mesh so one dimension becomes `target_mm`, keeping proportions.
+
+        `axis` is x, y, z, max (longest side - the usual "make it this big") or
+        min. Defaults to a dry run reporting the before/after detail trade-off;
+        pass apply=true to write a scaled STL ready for slicing.
+
+        To match a real object, measure it first with `camera_measure`, or look
+        up its size in the mhs://reference-objects resource.
+        """
+        try:
+            file = _model_path(path)
+            model = meshlib.load_mesh(file)
+            spec = spec_for(app.settings.get(printer).model if app.settings.printers else None)
+            advice = scale_advice(model, spec, target_mm, axis)
+            if not apply:
+                advice["applied"] = False
+                advice["hint"] = "Call again with apply=true to write the scaled file."
+                return _ok(**advice)
+
+            scaled, _factor = model.scale_to_dimension(target_mm, axis)
+            target = Path(output_path).expanduser() if output_path else (
+                app.settings.capture_dir / "models" / f"{file.stem}-{target_mm:g}mm.stl"
+            )
+            written = meshlib.save_stl(scaled, target)
+            report = analyze_print(scaled, spec)
+        except MHSError as exc:
+            return _fail(exc)
+        advice["applied"] = True
+        return _ok(**advice, output=str(written), model=scaled.summary(),
+                   printability=report.to_dict(), verdict=report.verdict())
+
+    # ------------------------------------------------- measuring the result
+    def _calibration(printer_id: str) -> vision.ScaleCalibration | None:
+        stored = app.store.get_calibration(printer_id)
+        return vision.ScaleCalibration.from_dict(stored) if stored else None
+
+    @server.tool()
+    async def camera_grid(printer: str | None = None, grid_px: int = 80) -> Image:
+        """Capture a frame and overlay a labelled pixel grid.
+
+        Read coordinates off this image - the grid is what makes "the coin spans
+        x=410 to x=498" accurate rather than a guess. The frame is saved, and
+        `camera_calibrate` and `camera_measure` then work against this same one.
+        """
+        device = await _printer(printer)
+        device.require(Capability.CAMERA_SNAPSHOT)
+        frame = await device.snapshot()
+        raw = app.capture_path(device.printer_id, "grid-source")
+        raw.write_bytes(frame)
+        app.store.add_observation(device.printer_id, kind="snapshot", image_path=str(raw))
+        annotated = vision.annotate_grid(frame, grid_px, _calibration(device.printer_id))
+        app.capture_path(device.printer_id, "grid").with_suffix(".png").write_bytes(annotated)
+        return Image(data=annotated, format="png")
+
+    @server.tool()
+    async def camera_calibrate(
+        reference: str,
+        pixel_length: float,
+        printer: str | None = None,
+        note: str | None = None,
+    ) -> dict:
+        """Set the camera's millimetres-per-pixel from a known object in the frame.
+
+        `reference` is a name from mhs://reference-objects (e.g. "sgd_1",
+        "usd_quarter") or a plain size in mm; `pixel_length` is how many pixels
+        that object spans, read off `camera_grid`. Put the object flat on the
+        plate, near whatever you want to measure - the calibration is only valid
+        in that plane.
+        """
+        try:
+            device = await _printer(printer)
+            calibration = vision.calibrate(
+                reference, pixel_length, printer_id=device.printer_id, note=note
+            )
+            app.store.save_calibration(device.printer_id, calibration.to_dict())
+        except MHSError as exc:
+            return _fail(exc)
+        return _ok(
+            calibration=calibration.to_dict(),
+            example=f"1 mm is now {1 / calibration.mm_per_pixel:.1f} px; the 180 mm plate would "
+                    f"span {180 / calibration.mm_per_pixel:.0f} px.",
+            caveat=vision.ACCURACY_CAVEAT,
+        )
+
+    @server.tool()
+    async def camera_measure(
+        point_a: list[float],
+        point_b: list[float],
+        printer: str | None = None,
+        target_mm: float | None = None,
+        frame_path: str | None = None,
+        label: str | None = None,
+    ) -> dict:
+        """Measure between two pixel coordinates on the latest camera frame.
+
+        Pass the endpoints as [x, y] pairs read off `camera_grid`. With a
+        calibration set, returns millimetres and draws the span back onto the
+        frame so the reading can be checked. Give `target_mm` to compare a
+        printed part against its intended size.
+        """
+        try:
+            device = await _printer(printer)
+            source = frame_path or app.store.latest_snapshot(device.printer_id)
+            if not source or not Path(source).is_file():
+                return _fail(CommandRejected(
+                    "no camera frame to measure",
+                    hint="Call camera_grid first; measurements must use the frame the "
+                         "coordinates were read from.",
+                ))
+            if len(point_a) != 2 or len(point_b) != 2:
+                return _fail(CommandRejected("points must be [x, y] pixel pairs"))
+            calibration = _calibration(device.printer_id)
+            annotated, pixels, millimetres = vision.annotate_measurement(
+                Path(source).read_bytes(), tuple(point_a), tuple(point_b), calibration, label
+            )
+            out = app.capture_path(device.printer_id, "measure").with_suffix(".png")
+            out.write_bytes(annotated)
+        except MHSError as exc:
+            return _fail(exc)
+
+        result: dict[str, Any] = {
+            "pixels": round(pixels, 1),
+            "millimetres": round(millimetres, 2) if millimetres is not None else None,
+            "frame": str(source),
+            "annotated_image": str(out),
+            "caveat": vision.ACCURACY_CAVEAT,
+        }
+        if millimetres is None:
+            result["hint"] = "Uncalibrated: call camera_calibrate with a known object first."
+        elif target_mm:
+            result["comparison"] = vision.compare_to_target(millimetres, target_mm)
+        return _ok(**result)
+
+    @server.tool()
+    async def read_annotated_image(path: str) -> Image:
+        """Return a saved grid or measurement image so you can look at it again."""
+        file = Path(path).expanduser()
+        captures = app.settings.capture_dir.resolve()
+        if not file.resolve().is_relative_to(captures):
+            raise ToolError(f"{path} is outside the capture directory {captures}")
+        if not file.is_file():
+            raise ToolError(f"no image at {path}")
+        return Image(data=file.read_bytes(), format=file.suffix.lstrip(".").lower() or "png")
+
+    # ------------------------------------------------- MHS standard surface
+    @server.tool()
+    async def describe_device(printer: str | None = None, as_markdown: bool = True) -> dict:
+        """The device's MHS descriptor: what it is, what it exposes, what it refuses.
+
+        Read this before operating an unfamiliar machine - it lists every
+        channel with its units and enforced limits, the resolution the hardware
+        can actually achieve, and what the device cannot do.
+        """
+        try:
+            device = await _printer(printer)
+            descriptor = await device.describe()
+        except MHSError as exc:
+            return _fail(exc)
+        payload = {"descriptor": descriptor}
+        if as_markdown:
+            payload["reference"] = descriptor_markdown(descriptor)
+        return _ok(**payload)
+
+    @server.tool()
+    async def list_channels(printer: str | None = None) -> dict:
+        """List the device's read/write channels with their units and limits."""
+        try:
+            device = await _printer(printer)
+            return _ok(channels=device.channel_table().to_list())
+        except MHSError as exc:
+            return _fail(exc)
+
+    @server.tool()
+    async def read_channel(channel: str, printer: str | None = None) -> dict:
+        """Read one channel by name (the MHS read primitive), e.g. "nozzle.temperature"."""
+        try:
+            device = await _printer(printer)
+            value = await device.read(channel)
+        except MHSError as exc:
+            return _fail(exc)
+        entry = device.channel_table().get(channel)
+        if entry.value_type == "binary":
+            return _ok(channel=channel, value_type="binary", bytes=len(value),
+                       hint="Use capture_snapshot to see the image itself.")
+        return _ok(channel=channel, value=value, unit=entry.unit)
+
+    @server.tool()
+    async def write_channel(
+        channel: str, value: Any, confirm: bool = False, printer: str | None = None
+    ) -> dict:
+        """Write one channel by name (the MHS write primitive).
+
+        The value is range-checked against the channel's declared limits in the
+        driver before it reaches the hardware; channels that move or heat the
+        machine also require confirm=true.
+        """
+        try:
+            app.require_writable(f"write {channel}")
+            device = await _printer(printer)
+            result = await device.write(channel, value, confirm=confirm)
+        except MHSError as exc:
+            return _fail(exc)
+        return _ok(channel=channel, value=value, result=result)
+
     # ------------------------------------------------------------- resources
     @server.resource("mhs://printers", mime_type="application/json")
     async def printers_resource() -> dict:
@@ -597,6 +893,23 @@ def create_server(settings: Settings | None = None, *, run_scheduler: bool = Tru
     async def status_resource(printer_id: str) -> dict:
         """Live status of one printer."""
         return await get_status(printer_id)
+
+    @server.resource("mhs://reference-objects", mime_type="application/json")
+    async def reference_objects_resource() -> dict:
+        """Known objects and their real sizes, for calibrating the camera."""
+        return {
+            "objects": [
+                {"name": name, "size_mm": size, "label": label}
+                for name, (size, label) in sorted(vision.REFERENCE_OBJECTS.items())
+            ],
+            "usage": "Put one flat on the plate, call camera_grid, read its span in pixels, "
+                     "then camera_calibrate(reference=<name>, pixel_length=<px>).",
+        }
+
+    @server.resource("mhs://printer/{printer_id}/descriptor", mime_type="application/json")
+    async def descriptor_resource(printer_id: str) -> dict:
+        """MHS device descriptor for one printer."""
+        return await describe_device(printer_id, as_markdown=False)
 
     @server.resource("mhs://printer/{printer_id}/history", mime_type="application/json")
     async def history_resource(printer_id: str) -> dict:
@@ -623,6 +936,23 @@ def create_server(settings: Settings | None = None, *, run_scheduler: bool = Tru
             "tried and how they scored, propose exactly one change for the next print, "
             "explain the expected effect, and after printing record the result with "
             "log_print_result including a 1-10 score."
+        )
+
+    @server.prompt()
+    def design_iteration(goal: str = "a part sized to match a reference object") -> str:
+        """Run the full design-print-measure loop."""
+        return (
+            f"Goal: {goal}.\n"
+            "1. analyze_model and preview_model - look at the render and say what you see.\n"
+            "2. Check the printability findings: which detail is below the printer's "
+            "resolution at this size?\n"
+            "3. If it needs resizing, camera_grid + camera_calibrate against a known object, "
+            "measure the reference, then scale_model (dry run first, then apply).\n"
+            "4. Re-run analyze_model on the scaled file and say what the scaling cost in detail.\n"
+            "5. After slicing and printing, camera_grid + camera_measure the result against the "
+            "target, then log_print_result with a score and what to change next time.\n"
+            "Be explicit about measurement uncertainty, and never start a print without "
+            "confirming the plate is clear."
         )
 
     return server

@@ -5,12 +5,12 @@ build-backend = "hatchling.build"
 [project]
 name = "mhs-printer"
 version = "0.1.0"
-description = "Model Hardware Standard: an MCP server and driver layer that lets Claude drive 3D printers (Bambu Lab A1 mini and friends)"
+description = "An MHS-aligned MCP server and driver layer that lets Claude drive, measure and design for 3D printers (Bambu Lab A1 mini and friends)"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { file = "LICENSE" }
 authors = [{ name = "zhenwei2972" }]
-keywords = ["mcp", "model-context-protocol", "3d-printing", "bambu-lab", "a1-mini", "claude"]
+keywords = ["mcp", "mhs", "model-hardware-standard", "3d-printing", "bambu-lab", "a1-mini", "claude"]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Intended Audience :: Developers",
@@ -21,6 +21,8 @@ classifiers = [
 dependencies = [
   "mcp>=2.0",
   "paho-mqtt>=2.1",
+  "numpy>=1.24",   # mesh geometry and the software rasteriser
+  "pillow>=10.0",  # camera frames, grid overlays, render output
   "tomli>=2.0; python_version < '3.11'",
 ]
 

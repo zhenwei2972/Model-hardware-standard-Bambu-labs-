@@ -59,6 +59,12 @@ CREATE TABLE IF NOT EXISTS observations (
     created_at  REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_obs_run ON observations (run_id, created_at);
+
+CREATE TABLE IF NOT EXISTS calibrations (
+    printer_id  TEXT PRIMARY KEY,
+    payload     TEXT NOT NULL,
+    updated_at  REAL NOT NULL
+);
 """
 
 JOB_STATUSES = ("pending", "started", "done", "failed", "cancelled", "missed")
@@ -317,6 +323,41 @@ class Store:
         sql += " ORDER BY created_at DESC LIMIT ?"
         params.append(limit)
         return [dict(r) for r in self._query(sql, tuple(params))]
+
+
+    # -- camera scale calibration -----------------------------------------
+    def save_calibration(self, printer_id: str, payload: dict) -> None:
+        """Store the current mm-per-pixel for a printer's camera.
+
+        One per printer: it is only valid for the camera's fixed position, so a
+        newer reading always supersedes the old one.
+        """
+        self._execute(
+            "INSERT INTO calibrations (printer_id, payload, updated_at) VALUES (?, ?, ?) "
+            "ON CONFLICT(printer_id) DO UPDATE SET payload = excluded.payload, "
+            "updated_at = excluded.updated_at",
+            (printer_id, json.dumps(payload), time.time()),
+        )
+
+    def get_calibration(self, printer_id: str) -> dict | None:
+        rows = self._query("SELECT payload FROM calibrations WHERE printer_id = ?", (printer_id,))
+        return json.loads(rows[0]["payload"]) if rows else None
+
+    def clear_calibration(self, printer_id: str) -> None:
+        self._execute("DELETE FROM calibrations WHERE printer_id = ?", (printer_id,))
+
+    def latest_snapshot(self, printer_id: str) -> str | None:
+        """Path of the most recent camera frame saved for this printer.
+
+        Measurements must run against the frame the coordinates were read from,
+        so this is what `camera_measure` defaults to.
+        """
+        rows = self._query(
+            "SELECT image_path FROM observations WHERE printer_id = ? AND image_path IS NOT NULL "
+            "ORDER BY created_at DESC LIMIT 1",
+            (printer_id,),
+        )
+        return rows[0]["image_path"] if rows else None
 
 
 def _run_to_dict(row: sqlite3.Row) -> dict:

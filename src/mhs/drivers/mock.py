@@ -45,7 +45,7 @@ class MockPrinter(Printer):
     total_layers = 120
 
     def __init__(self, config: PrinterConfig) -> None:
-        super().__init__(config.printer_id)
+        super().__init__(config.printer_id, config.model or "A1 mini")
         self.config = config
         self.connected = False
         self.files: dict[str, FileEntry] = {

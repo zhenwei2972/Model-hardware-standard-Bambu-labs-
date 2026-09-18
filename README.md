@@ -1,59 +1,78 @@
 # MHS — Model Hardware Standard for 3D printers
 
-An MCP server plus a small vendor-neutral driver layer, so Claude (or any
-MCP client) can drive a **Bambu Lab A1 mini** — and, by design, other printers —
-over the local network: start prints, watch them, schedule them for later, and
-look at the camera to decide what to change next.
+An MCP server plus a vendor-neutral driver layer, aligned to Anthropic's
+[Model Hardware Standard](https://www.anthropic.com/news/model-hardware-standard-research-preview),
+so Claude (or any MCP client) can operate a **Bambu Lab A1 mini** — and, by
+design, other printers — over the local network: start and schedule prints,
+watch them, look at the model before printing it, and measure the result through
+the camera.
 
 ```
-Claude  ──MCP(stdio)──▶  mhs server  ──▶  Printer ABC  ──▶  bambu driver  ──▶  MQTT  8883  telemetry + control
-                             │                            └▶ mock driver      FTPS  990   sliced file upload
-                             ├─ scheduler (SQLite)                            TCP   6000  JPEG camera frames
-                             └─ print journal (SQLite)
+                        ┌─ standard/  read/write channels + safety limits + device descriptor
+Claude ──MCP(stdio)──▶  │             (the MHS-shaped surface)
+                        ├─ design/    mesh · render · printability · camera measurement
+       mhs server ──────┤
+                        ├─ scheduler + print journal (SQLite)
+                        │
+                        └─ Printer ABC ──▶ bambu driver ──▶ MQTT 8883  telemetry + control
+                                        └▶ mock driver      FTPS  990  sliced file upload
+                                                            TCP   6000 JPEG camera frames
 ```
 
-## Is there an "Anthropic hardware standard" for the A1 mini?
+## Relationship to Anthropic's Model Hardware Standard
 
-Short answer: **no official one, and nothing from Anthropic that is printer- or
-Bambu-specific.** Worth separating three things:
+[MHS](https://www.anthropic.com/news/model-hardware-standard-research-preview) is
+Anthropic's specification for letting AI agents safely operate physical
+equipment, opened as a research preview on 27 August 2026 with HHMI Janelia,
+Genentech, Tecan, Universal Robots and others. Its full specification and
+reference implementation are **not public yet** - Anthropic has said it will
+open-source them after the preview - so nothing here can claim conformance to a
+published schema. What this repository does is implement the four properties the
+announcement describes, in the places where they change the code rather than the
+marketing:
 
-1. **Anthropic's standard is MCP** (the Model Context Protocol) — a general
-   protocol for exposing tools, resources and prompts to a model. It is not a
-   hardware standard: there is no Anthropic-defined device profile, no
-   "printer" schema, no certification. Hardware support is whatever an MCP
-   server chooses to expose.
-2. **Bambu Lab publishes no official local API.** Everything below is built on
-   the community-reverse-engineered LAN interfaces documented by
-   [OpenBambuAPI](https://github.com/Doridian/OpenBambuAPI), which Bambu
-   tolerates but does not support. Their officially blessed third-party path is
-   Bambu Connect / the cloud API.
-3. **Community MCP servers for Bambu already exist** — e.g.
-   [griches/bambu-mcp](https://github.com/griches/bambu-mcp),
-   [schwarztim/bambu-mcp](https://github.com/schwarztim/bambu-mcp),
-   [DMontgomery40/mcp-3D-printer-server](https://github.com/DMontgomery40/mcp-3D-printer-server).
-   They are mostly one-vendor wrappers around MQTT. This repo differs in three
-   ways that matter for the end state you asked about: a **driver interface** so
-   the same tools cover non-Bambu hardware, a **persistent scheduler** for
-   "print at 06:30", and a **print journal + camera capture** so a model can
-   iterate on settings across prints instead of reacting to one status blob.
+| MHS property | Where it lives here |
+| --- | --- |
+| `read`/`write` primitives over named channels | `Printer.read()` / `Printer.write()`, built in `device.py` from each driver's capabilities |
+| A device description an agent can enumerate | `describe_device` / `mhs://printer/{id}/descriptor`, generated in `standard/descriptor.py` |
+| Natural-language tags for what the device is | the `tags` and `cannot` sections of that descriptor |
+| Safety limits in the driver, not the prompt | `SafetyLimit` on each channel, checked before dispatch (`standard/channels.py`) |
 
-So: not implemented as a standard — but the standard you actually need (MCP)
-plus the printer's LAN interfaces are enough to build it, which is what is here.
+The last one is the load-bearing difference. `write("nozzle.temperature", 350)`
+is refused by the driver with the reason attached - "the A1 mini hotend is rated
+to 300 C" - and no prompt wording, tool argument or retry gets around it,
+because the check runs before anything reaches the hardware.
+
+When the specification lands, `standard/descriptor.py` is the one file that has
+to change to emit the official format.
+
+Bambu Lab publishes no official local API of its own, so the transport layer is
+built on the community-documented interfaces in
+[OpenBambuAPI](https://github.com/Doridian/OpenBambuAPI). Other Bambu MCP servers
+exist ([griches](https://github.com/griches/bambu-mcp),
+[schwarztim](https://github.com/schwarztim/bambu-mcp),
+[DMontgomery40](https://github.com/DMontgomery40/mcp-3D-printer-server)); they are
+mostly MQTT wrappers. What is different here is the MHS channel layer, a driver
+interface that is not Bambu-specific, a persistent scheduler, and the design loop
+below.
 
 ## What works today
 
 | Area | Tools |
 | --- | --- |
-| Discovery | `list_printers`, `get_printer_info`, `check_connection` |
+| Discovery | `list_printers`, `get_printer_info`, `check_connection`, `describe_device` |
+| MHS primitives | `list_channels`, `read_channel`, `write_channel` |
 | Monitoring | `get_status` (state, layer, progress, temps, filament, decoded HMS alerts) |
 | Files | `list_files`, `upload_file` |
 | Printing | `start_print`, `upload_and_print`, `pause_print`, `resume_print`, `stop_print` |
 | Controls | `set_temperature`, `set_light`, `set_print_speed`, `send_gcode` (safe-listed) |
 | Camera | `capture_snapshot` (returns the JPEG to the model), `capture_frames`, `read_capture` |
 | Scheduling | `schedule_print`, `list_scheduled_jobs`, `cancel_scheduled_job` |
+| Model | `analyze_model`, `preview_model`, `scale_model` |
+| Measuring | `camera_grid`, `camera_calibrate`, `camera_measure`, `read_annotated_image` |
 | Iteration | `log_print_result`, `record_observation`, `list_print_history`, `get_print_run` |
-| Resources | `mhs://printers`, `mhs://printer/{id}/status`, `mhs://printer/{id}/history` |
-| Prompts | `diagnose_print`, `tune_settings` |
+| Resources | `mhs://printers`, `mhs://printer/{id}/status`, `mhs://printer/{id}/history`, `mhs://printer/{id}/descriptor`, `mhs://reference-objects` |
+| Prompts | `diagnose_print`, `tune_settings`, `design_iteration` |
 
 Not included: slicing. Hand the server a sliced `.3mf`/`.gcode` from Bambu
 Studio or OrcaSlicer. (Driving a slicer CLI is a natural next driver — see
@@ -156,13 +175,17 @@ what the test suite runs against).
 
 ```
 src/mhs/
-  device.py        Printer ABC + Capability checks        models.py   normalised status/telemetry types
-  config.py        TOML + env configuration               store.py    SQLite: job queue + print journal
+  device.py        Printer ABC, capabilities, read/write  models.py   normalised status/telemetry types
+  config.py        TOML + env configuration               store.py    SQLite: jobs, journal, calibration
   scheduler.py     deferred prints, pre-flight, windows   app.py      pool + store + scheduler wiring
-  server.py        the MCP surface                        cli.py      the same thing for humans
+  specs.py         hardware specs and detail limits       server.py   the MCP surface
+  cli.py           the same capabilities for humans
+  standard/        channels.py (limits), descriptor.py (the MHS device reference file)
+  design/          mesh.py (STL/OBJ/3MF), render.py (z-buffer rasteriser),
+                   printability.py (the critique), vision.py (camera measurement)
   drivers/bambu/   mqtt.py files.py camera.py commands.py state.py hms.py tls.py
   drivers/mock.py  simulated printer
-docs/              PROTOCOL.md (wire formats), SETUP.md, ROADMAP.md
+docs/              PROTOCOL.md, SETUP.md, DESIGN_LOOP.md, MHS_ALIGNMENT.md, ROADMAP.md
 ```
 
 ## Tests
@@ -172,14 +195,18 @@ pytest          # no hardware required — every test runs against the mock driv
 ruff check .
 ```
 
-The protocol-shaped parts (command payloads, delta-merged telemetry, the camera
-framing, FTPS path safety, scheduler windows) are tested directly, because those
-are the parts that are expensive to debug against a real machine.
+The parts that are expensive to debug against a real machine are tested
+directly: command payloads, delta-merged telemetry, camera framing, FTPS path
+safety, scheduler windows, channel safety limits, and the geometry - mesh volume
+and area are checked against analytic values, and the renderer against known
+occlusion cases.
 
 ## Credits
 
 Wire formats from [OpenBambuAPI](https://github.com/Doridian/OpenBambuAPI)
 (MQTT, FTPS, the port-6000 camera protocol and the pinned CA bundle). Bambu Lab
-does not endorse or support this project.
+does not endorse or support this project, and neither does Anthropic: the MHS
+alignment here is this repository's reading of a public announcement, not a
+certification.
 
 MIT licensed.
