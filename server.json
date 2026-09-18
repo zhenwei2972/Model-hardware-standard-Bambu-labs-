@@ -1,0 +1,71 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.zhenwei2972/mhs-printer",
+  "title": "Bambu Lab 3D printers (MHS)",
+  "description": "Operate Bambu Lab 3D printers over the LAN: print, schedule, monitor, camera, printability",
+  "version": "0.1.0",
+  "repository": {
+    "url": "https://github.com/zhenwei2972/Model-hardware-standard-Bambu-labs-",
+    "source": "github"
+  },
+  "websiteUrl": "https://github.com/zhenwei2972/Model-hardware-standard-Bambu-labs-#readme",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "identifier": "mhs-printer",
+      "version": "0.1.0",
+      "runtimeHint": "uvx",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "name": "BAMBU_HOST",
+          "description": "Printer IP address on your LAN, from the printer screen under Settings > Network.",
+          "isRequired": true,
+          "format": "string"
+        },
+        {
+          "name": "BAMBU_SERIAL",
+          "description": "Printer serial number. Used as the TLS certificate name, so it must match exactly.",
+          "isRequired": true,
+          "format": "string"
+        },
+        {
+          "name": "BAMBU_ACCESS_CODE",
+          "description": "LAN access code shown on the printer screen. Never leaves your network.",
+          "isRequired": true,
+          "isSecret": true,
+          "format": "string"
+        },
+        {
+          "name": "BAMBU_MODEL",
+          "description": "Printer model, used for build volume and safety limits: 'A1 mini', 'A1', 'P1P', 'P1S' or 'X1C'.",
+          "isRequired": false,
+          "default": "A1 mini",
+          "format": "string"
+        },
+        {
+          "name": "MHS_READ_ONLY",
+          "description": "Set to 1 for monitoring and camera only; every write is refused. Recommended for a first run.",
+          "isRequired": false,
+          "default": "0",
+          "format": "string"
+        },
+        {
+          "name": "MHS_STATE_DIR",
+          "description": "Where the scheduled-job queue, print journal and captured frames are stored.",
+          "isRequired": false,
+          "format": "string"
+        },
+        {
+          "name": "MHS_MOCK",
+          "description": "Set to 1 to run against a simulated printer, so every tool can be tried without hardware.",
+          "isRequired": false,
+          "default": "0",
+          "format": "string"
+        }
+      ]
+    }
+  ]
+}

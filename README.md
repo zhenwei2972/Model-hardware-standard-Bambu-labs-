@@ -1,11 +1,20 @@
-# MHS — Model Hardware Standard for 3D printers
+# MHS — an MCP server for Bambu Lab 3D printers
 
-An MCP server plus a vendor-neutral driver layer, aligned to Anthropic's
-[Model Hardware Standard](https://www.anthropic.com/news/model-hardware-standard-research-preview),
-so Claude (or any MCP client) can operate a **Bambu Lab A1 mini** — and, by
-design, other printers — over the local network: start and schedule prints,
-watch them, look at the model before printing it, and measure the result through
-the camera.
+<!-- mcp-name: io.github.zhenwei2972/mhs-printer -->
+
+Connect Claude (or any MCP client) to a **Bambu Lab A1 mini, A1, P1P, P1S or X1**
+over your local network — no cloud account. Start and schedule prints, monitor
+them, read the chamber camera, measure printed parts against a reference object,
+and check whether a model is actually printable before slicing it.
+
+Built on a vendor-neutral driver layer and aligned to Anthropic's
+[Model Hardware Standard](https://www.anthropic.com/news/model-hardware-standard-research-preview):
+`read`/`write` primitives over named channels, a discoverable device
+descriptor, and safety limits enforced in the driver rather than the prompt.
+
+**Supported hardware:** Bambu Lab A1 mini · A1 · P1P · P1S · X1 Carbon · X1E,
+over LAN MQTT (8883), FTPS (990) and the chamber camera (6000).
+**Works with:** Claude Code, Claude Desktop, and any MCP-compatible client.
 
 ```
                         ┌─ standard/  read/write channels + safety limits + device descriptor
@@ -74,62 +83,165 @@ below.
 | Resources | `mhs://printers`, `mhs://printer/{id}/status`, `mhs://printer/{id}/history`, `mhs://printer/{id}/descriptor`, `mhs://reference-objects` |
 | Prompts | `diagnose_print`, `tune_settings`, `design_iteration` |
 
-Not included: slicing. Hand the server a sliced `.3mf`/`.gcode` from Bambu
-Studio or OrcaSlicer. (Driving a slicer CLI is a natural next driver — see
+Not included: slicing. The design tools work on `.stl`/`.obj`/`.3mf` meshes and
+stop at "ready to slice"; hand the printer a sliced plate from Bambu Studio or
+OrcaSlicer. (Driving a slicer CLI is the next step — see
 [docs/ROADMAP.md](docs/ROADMAP.md).)
 
-## Quick start
+## The design loop
+
+The point of the model-side tools is that Claude can size a part against a real
+object, see what it will look like, know in advance which detail the machine
+cannot reproduce, print it, and then measure the result through the camera:
+
+```
+analyze_model  -> dimensions, volume, and every finding that matters:
+                  fits the plate? detail below the extrusion width? thin walls?
+                  overhangs? bed contact? layer count? grams of filament?
+preview_model  -> orthographic views at a shared scale, with a mm scale bar and
+                  overhangs tinted red — an image, so the model can actually look
+camera_grid    -> a frame with a labelled pixel grid, so coordinates are read
+                  rather than guessed
+camera_calibrate("sgd_1", 88)   -> a coin of known diameter fixes mm-per-pixel
+scale_model(target_mm=24.65)    -> dry run first: it reports how much detail
+                                   crosses the printable threshold either way
+camera_measure -> measure the printed part, compare against the target, and get
+                  the rescale factor that would correct it
+log_print_result -> the journal, so the next iteration starts from evidence
+```
+
+Worked example: [docs/DESIGN_LOOP.md](docs/DESIGN_LOOP.md).
+
+Two honest limits. Feature size is estimated from mesh edge lengths and the
+volume-to-area ratio, not a medial-axis analysis: it reliably catches "far too
+fine" and "wall too thin", not every thin region in a complex part. And the
+chamber camera is off-axis with lens distortion, so measurements are good to a
+few percent with a reference object in the same plane — not caliper-grade. Both
+caveats are returned with the results rather than buried here.
+
+## Install
+
+Python 3.10+.
 
 ```bash
-pip install -e ".[dev]"
-
-# 1. Try everything without hardware
-MHS_MOCK=1 mhs status
-MHS_MOCK=1 mhs print cache/benchy.3mf -y
-
-# 2. Point it at a real printer
-cp examples/config.example.toml config.toml   # edit host/serial/access code
-mhs doctor            # probes tcp/8883, tcp/990, tcp/6000 then each transport
-mhs status
-mhs snapshot -o bed.jpg
-mhs upload ~/Downloads/plate_1.3mf
-mhs print cache/plate_1.3mf
-mhs schedule cache/plate_1.3mf "2026-09-19T06:30" --window 90
-mhs scheduler         # keep running so queued jobs can fire
+git clone https://github.com/zhenwei2972/Model-hardware-standard-Bambu-labs-.git
+cd Model-hardware-standard-Bambu-labs-
+python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"
 ```
 
-On the printer first: **Settings → General → LAN Only Mode + Developer Mode**
-(and **LAN Mode Liveview** for the camera). Since firmware 01.05.00.00 on the
-A1 series, Bambu's Authorization Control System blocks third-party *control* in
-cloud mode — monitoring still works, but `start_print` will be silently ignored,
-which this server reports as `acknowledged: false` rather than pretending it
-worked. Full setup walkthrough: [docs/SETUP.md](docs/SETUP.md).
+## Configure the printer
 
-### Wire it to Claude
+On the printer's touchscreen: **Settings → General**
 
-`claude mcp add mhs -- mhs-mcp` — or add it by hand (see
-[examples/claude_desktop_config.json](examples/claude_desktop_config.json)):
+| Toggle | Needed for |
+| --- | --- |
+| **LAN Only Mode** | serving MQTT/FTPS locally |
+| **Developer Mode** | *control* — without it, firmware ≥ 01.05 on the A1 series silently ignores start/stop/heat commands |
+| **LAN Mode Liveview** | the chamber camera on tcp/6000 |
 
-```json
-{
-  "mcpServers": {
-    "mhs": {
-      "command": "mhs-mcp",
-      "env": {
-        "BAMBU_HOST": "192.168.1.42",
-        "BAMBU_SERIAL": "01P00A000000000",
-        "BAMBU_ACCESS_CODE": "12345678",
-        "MHS_STATE_DIR": "~/.local/share/mhs"
-      }
-    }
-  }
-}
+Then collect three values — **IP address** and **Access Code** from
+Settings → Network, and the **serial number** from the sticker or Bambu Studio →
+Device (it is the TLS certificate name, so it must match exactly):
+
+```bash
+export BAMBU_HOST=192.168.1.42
+export BAMBU_SERIAL=01P00A000000000
+export BAMBU_ACCESS_CODE=12345678
 ```
+
+or copy `examples/config.example.toml` to `config.toml` (git-ignored) for
+multiple printers. Full walkthrough, including what each failure mode looks
+like: [docs/SETUP.md](docs/SETUP.md).
+
+## Connect it to Claude
+
+```bash
+claude mcp add mhs \
+  --env BAMBU_HOST=192.168.1.42 \
+  --env BAMBU_SERIAL=01P00A000000000 \
+  --env BAMBU_ACCESS_CODE=12345678 \
+  --env MHS_READ_ONLY=1 \
+  -- "$PWD/.venv/bin/mhs-mcp"
+```
+
+For Claude Desktop, merge [examples/claude_desktop_config.json](examples/claude_desktop_config.json)
+into `claude_desktop_config.json` (macOS `~/Library/Application Support/Claude/`,
+Windows `%APPDATA%\Claude\`). Use absolute paths there — the desktop app does
+not inherit your shell's `PATH`; `which mhs-mcp` gives you the right one.
 
 Then, in a session:
 
 > *"Is the A1 mini free? If so print `cache/bracket_v3.3mf` at 06:30 tomorrow,
-> and take a look at the first layer once it starts."*
+> and look at the first layer once it starts."*
+
+## Testing it
+
+Three tiers. The first two need no printer, and each stands on its own.
+
+### 1. No printer, no Claude
+
+Exercises every code path except the real transports:
+
+```bash
+.venv/bin/pytest -q                  # 253 tests, no hardware required
+export MHS_MOCK=1                    # a simulated A1 mini
+.venv/bin/mhs describe               # the MHS device descriptor
+.venv/bin/mhs channels               # every read/write channel and its limits
+.venv/bin/mhs write nozzle.temperature 400   # refused by the driver, with the reason
+.venv/bin/mhs inspect your-model.stl # printability critique
+.venv/bin/mhs preview your-model.stl -o preview.png
+.venv/bin/mhs grid && .venv/bin/mhs calibrate sgd_1 100 && .venv/bin/mhs measure 0 0 200 0
+.venv/bin/mhs doctor
+```
+
+With `MHS_MOCK=1` each CLI command is a fresh process, so `mhs print` followed
+by `mhs status` shows idle again — the fake printer has no memory between
+invocations. Inside one MCP session it persists normally.
+
+### 2. Wired to Claude, still no printer
+
+Checks the tools from the model's side before hardware is involved:
+
+```bash
+claude mcp add mhs-demo --env MHS_MOCK=1 -- "$PWD/.venv/bin/mhs-mcp"
+```
+
+> *"Run describe_device and tell me what this printer can and cannot do. Then
+> analyze_model on ~/models/thing.stl, show me the preview, and tell me what
+> scaling it to 24.65 mm would cost in detail."*
+
+A rendered image and a printability verdict means the whole stack works — only
+the transports are untested.
+
+### 3. The real printer
+
+```bash
+.venv/bin/mhs doctor
+```
+
+```
+printer 'a1mini' driver=bambu model=A1 mini
+  host 192.168.1.42  serial 01P0***  tls=verify
+  tcp/8883  mqtt    open
+  tcp/990   ftps    open
+  tcp/6000  camera  open
+  telemetry  ok    a1mini: idle, nozzle 24/0C, bed 24/0C
+  files      ok    3 items/bytes
+  camera     ok    98431 items/bytes
+all good
+```
+
+`doctor` probes each port, then each transport, and names the misconfiguration:
+
+| Symptom | Cause |
+| --- | --- |
+| all three ports closed | wrong IP, printer asleep, or Wi-Fi client isolation / separate VLAN |
+| tcp/6000 closed only | LAN Mode Liveview is off |
+| `CERTIFICATE_VERIFY_FAILED` | serial mismatch — re-check it, or set `tls_mode = "ca_only"` |
+| FTPS login refused | wrong Access Code (it changes after re-pairing) |
+| telemetry fine, commands `acknowledged: false` | Developer Mode is off |
+
+Start with `MHS_READ_ONLY=1` so the first session can only look, then drop it.
 
 ## Safety model
 
@@ -200,6 +312,12 @@ directly: command payloads, delta-merged telemetry, camera framing, FTPS path
 safety, scheduler windows, channel safety limits, and the geometry - mesh volume
 and area are checked against analytic values, and the renderer against known
 occlusion cases.
+
+## Publishing
+
+[docs/PUBLISHING.md](docs/PUBLISHING.md) covers the registry manifest
+([`server.json`](server.json), validated against the official schema), PyPI
+release, and the discoverability checklist.
 
 ## Credits
 
