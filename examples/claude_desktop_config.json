@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "mhs": {
+      "command": "/absolute/path/to/mhs-mcp",
+      "args": [],
+      "env": {
+        "BAMBU_HOST": "192.168.1.42",
+        "BAMBU_SERIAL": "01P00A000000000",
+        "BAMBU_ACCESS_CODE": "12345678",
+        "BAMBU_MODEL": "A1 mini",
+        "MHS_STATE_DIR": "/absolute/path/to/mhs-state",
+        "MHS_READ_ONLY": "0"
+      }
+    }
+  }
+}

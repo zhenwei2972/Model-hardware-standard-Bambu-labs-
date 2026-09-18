@@ -1,0 +1,32 @@
+# Copy to ./config.toml (git-ignored) or ~/.config/mhs/config.toml
+
+[server]
+default_printer = "a1mini"
+# Monitoring only: every write tool refuses. Good for a first run.
+read_only = false
+# Lift the gcode safe-list. Leave false unless you know what you are sending.
+allow_raw_gcode = false
+# Where the job queue, print journal and captured frames live.
+# state_dir = "~/.local/share/mhs"
+
+[printers.a1mini]
+driver = "bambu"
+model = "A1 mini"              # also sets the reported build volume
+host = "192.168.1.42"          # printer screen -> Settings -> Network
+serial = "01P00A000000000"     # sticker on the back; used as the TLS cert name
+access_code = "12345678"       # 8 characters, same screen as the IP
+upload_dir = "cache"           # where uploads land on the printer
+tls_mode = "verify"            # verify | ca_only | insecure
+
+# A second printer is just another table; every tool takes printer="p1s".
+# [printers.p1s]
+# driver = "bambu"
+# model = "P1S"
+# host = "192.168.1.43"
+# serial = "01S00A000000000"
+# access_code = "87654321"
+
+# No hardware? This one needs nothing else.
+# [printers.demo]
+# driver = "mock"
+# model = "Mock A1 mini"
