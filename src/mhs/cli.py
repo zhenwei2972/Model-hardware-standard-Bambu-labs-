@@ -247,11 +247,23 @@ async def cmd_doctor(app, args) -> int:
             ok &= reachable
             extra = "" if reachable else "  <- closed: LAN Only Mode / Developer Mode off, or firewalled"
             print(f"  tcp/{port:<5} {label:<7} {'open' if reachable else 'closed'}{extra}")
-    printer = await _printer(app, args)
+    # Connecting can fail on its own, and a diagnostic that stops at the first
+    # failure is the least useful kind: report it and keep going, so one run
+    # shows every transport's state rather than only the first broken one.
+    try:
+        device = await _printer(app, args)
+    except MHSError as exc:
+        ok = False
+        print(f"  {'connect':<10} FAIL  {exc.message}")
+        if exc.hint:
+            print(f"             hint: {exc.hint}")
+        _doctor_verdict(ok, unreachable=True)
+        return 1
+
     for label, probe in (
-        ("telemetry", printer.status),
-        ("files", printer.list_files),
-        ("camera", printer.snapshot),
+        ("telemetry", device.status),
+        ("files", device.list_files),
+        ("camera", device.snapshot),
     ):
         try:
             result = await probe()
@@ -262,8 +274,27 @@ async def cmd_doctor(app, args) -> int:
             print(f"  {label:<10} FAIL  {exc.message}")
             if exc.hint:
                 print(f"             hint: {exc.hint}")
-    print("all good" if ok else "some checks failed - see hints above")
+        except Exception as exc:  # a driver bug should not hide the other checks
+            ok = False
+            print(f"  {label:<10} ERROR {type(exc).__name__}: {exc}")
+    _doctor_verdict(ok)
     return 0 if ok else 1
+
+
+def _doctor_verdict(ok: bool, unreachable: bool = False) -> None:
+    if ok:
+        print("all good")
+        return
+    print("some checks failed - see hints above")
+    if unreachable:
+        print(
+            "\nNothing answered. In order of likelihood:\n"
+            "  1. This machine is not on the same network as the printer. Check with:\n"
+            "       ping <printer ip>\n"
+            "  2. The network has client isolation on (common on guest and cafe Wi-Fi),\n"
+            "     which blocks device-to-device traffic no matter what the printer says.\n"
+            "  3. The printer is asleep or the IP has changed - re-check Settings > WLAN."
+        )
 
 
 # -- model-side commands ---------------------------------------------------

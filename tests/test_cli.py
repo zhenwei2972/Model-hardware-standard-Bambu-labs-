@@ -254,3 +254,50 @@ def test_printer_commands_refuse_a_vacuum(vacuum_cli, capsys):
     assert run(["status"]) == 1
     err = capsys.readouterr().err
     assert "not a printer" in err and "vacuum commands" in err
+
+
+# -- doctor ------------------------------------------------------------------
+def test_doctor_reports_every_transport_when_one_fails(cli_env, capsys, monkeypatch):
+    """A diagnostic that stops at the first failure is the least useful kind."""
+    from mhs.drivers.mock import MockPrinter
+    from mhs.errors import ConnectionFailed
+
+    async def broken_camera(self):
+        raise ConnectionFailed("camera refused", hint="turn on LAN Mode Liveview")
+
+    monkeypatch.setattr(MockPrinter, "snapshot", broken_camera)
+    assert run(["doctor"]) == 1
+    out = capsys.readouterr().out
+    assert "telemetry  ok" in out      # kept going
+    assert "files      ok" in out      # kept going
+    assert "camera     FAIL  camera refused" in out
+    assert "turn on LAN Mode Liveview" in out
+
+
+def test_doctor_explains_an_unreachable_device(cli_env, capsys, monkeypatch):
+    from mhs.drivers.mock import MockPrinter
+    from mhs.errors import ConnectionFailed
+
+    async def refuse(self):
+        raise ConnectionFailed("cannot reach 192.0.2.1:8883 - timed out")
+
+    monkeypatch.setattr(MockPrinter, "connect", refuse)
+    assert run(["doctor"]) == 1
+    out = capsys.readouterr().out
+    assert "connect    FAIL" in out
+    assert "client isolation" in out   # names the cause people actually hit
+    assert "ping" in out
+
+
+def test_doctor_survives_a_driver_bug(cli_env, capsys, monkeypatch):
+    """An unexpected exception in one probe must not hide the others."""
+    from mhs.drivers.mock import MockPrinter
+
+    async def explode(self, directory=""):
+        raise RuntimeError("driver bug")
+
+    monkeypatch.setattr(MockPrinter, "list_files", explode)
+    assert run(["doctor"]) == 1
+    out = capsys.readouterr().out
+    assert "files      ERROR RuntimeError: driver bug" in out
+    assert "camera     ok" in out       # the check after the crash still ran
