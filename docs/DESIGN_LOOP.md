@@ -145,6 +145,12 @@ log_print_result(run_id=7, outcome="partial", quality_score=6,
 list_print_history()   → what was tried, at what settings, and how it scored
 ```
 
+Better still, watch the print while it happens rather than reconstructing it
+afterwards. `watch_print(run_id=7)` photographs each stage as it is crossed —
+the first layer above all — and `print_report(run_id=7)` returns the timeline,
+your captions and the actual time against the slicer's estimate. See
+[MONITORING.md](MONITORING.md).
+
 ---
 
 ## What to trust

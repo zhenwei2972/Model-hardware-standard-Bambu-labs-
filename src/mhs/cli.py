@@ -27,6 +27,7 @@ from .design.printability import scale_advice
 from .design.render import render_to_png
 from .errors import MHSError
 from .models import PrintOptions
+from .monitor import MILESTONES, build_report, stage_name
 from .scheduler import parse_when
 from .specs import spec_for
 from .standard.descriptor import descriptor_markdown
@@ -222,6 +223,92 @@ async def cmd_history(app, args) -> int:
             score = f"{run['quality_score']}/10" if run["quality_score"] else "-"
             print(f"#{run['id']:<4} {run['started_at_iso']}  {run['outcome']:<11} {score:>5}  "
                   f"{run['job_name'] or run['remote_path'] or ''}")
+    return 0
+
+
+async def cmd_monitor(app, args) -> int:
+    """Watch a print through its stages, printing each one as it is crossed."""
+    if args.list_stages:
+        for milestone in MILESTONES.values():
+            print(f"{milestone.name:<15} {milestone.description}")
+            print(f"{'':<15} {milestone.why}")
+        return 0
+
+    monitor = await app.watch_print(
+        args.printer,
+        run_id=args.run,
+        poll_interval=args.interval,
+        milestones=tuple(args.stages) if args.stages else None,
+        camera=not args.no_camera,
+    )
+    camera = "with camera" if monitor.snapshot_fn is not None else "no camera"
+    print(f"watching {monitor.device_id} every {monitor.poll_interval:.0f}s ({camera}). Ctrl-C to stop.")
+    try:
+        while True:
+            await asyncio.sleep(3600)
+    except KeyboardInterrupt:
+        print()
+    finally:
+        await app.stop_watching(monitor.device_id)
+    print(f"captured: {', '.join(monitor.captured) or 'nothing'}")
+    return 0
+
+
+async def cmd_stages(app, args) -> int:
+    rows = [
+        row for row in app.store.list_observations(run_id=args.run, device_id=args.printer, limit=100)
+        if str(row.get("kind", "")).startswith("stage:")
+    ]
+    if args.json:
+        _print_json(rows)
+        return 0
+    for row in reversed(rows):
+        layer = f"layer {row['layer']}" if row["layer"] else "-"
+        print(f"#{row['id']:<4} {iso(row['created_at'])}  {stage_name(row['kind']):<15} {layer}")
+        print(f"      {row['text'] or ''}")
+        if row.get("image_path"):
+            print(f"      {row['image_path']}")
+        if row.get("caption"):
+            print(f"      \"{row['caption']}\"")
+    return 0
+
+
+async def cmd_caption(app, args) -> int:
+    row = app.store.caption_observation(args.observation_id, args.caption)
+    if row is None:
+        print(f"no observation {args.observation_id}", file=sys.stderr)
+        return 1
+    print(f"#{row['id']} {stage_name(row['kind'])}: {row['caption']}")
+    return 0
+
+
+async def cmd_report(app, args) -> int:
+    run = app.store.get_run(args.run_id)
+    if run is None:
+        print(f"no run {args.run_id}", file=sys.stderr)
+        return 1
+    stages = [o for o in run["observations"] if str(o.get("kind", "")).startswith("stage:")]
+    report = build_report(run, stages)
+    if args.json:
+        _print_json(report)
+        return 0
+
+    print(report["summary"])
+    print()
+    for row in report["timeline"]:
+        stamp = row["at"] or ""
+        print(f"  {stamp}  {row['milestone']:<15} {row['detail'] or ''}")
+        indent = " " * (len(stamp) + 20)
+        if row["caption"]:
+            print(f'{indent}"{row["caption"]}"')
+        elif row["image_path"]:
+            print(f"{indent}{row['image_path']} (uncaptioned)")
+    drift = report.get("time_vs_estimate")
+    if drift:
+        print(f"\ntime: {drift['actual_minutes']} min actual vs {drift['predicted_minutes']} min "
+              f"predicted - {drift['note']}")
+    if report["missing_milestones"]:
+        print(f"\nnever captured: {', '.join(report['missing_milestones'])}")
     return 0
 
 
@@ -741,6 +828,25 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = add("history", cmd_history, "past prints and their recorded outcomes")
     p.add_argument("--limit", type=int, default=20)
+    p.add_argument("--json", action="store_true")
+
+    p = add("monitor", cmd_monitor, "watch a print and photograph each stage")
+    p.add_argument("--run", type=int, help="print run id to file the stages under")
+    p.add_argument("--interval", type=float, default=20.0)
+    p.add_argument("--stages", nargs="+", choices=sorted(MILESTONES), metavar="STAGE")
+    p.add_argument("--no-camera", action="store_true", help="record stages as text only")
+    p.add_argument("--list-stages", action="store_true", help="show the stages and exit")
+
+    p = add("stages", cmd_stages, "stage frames captured so far")
+    p.add_argument("--run", type=int)
+    p.add_argument("--json", action="store_true")
+
+    p = add("caption", cmd_caption, "record what a stage frame shows")
+    p.add_argument("observation_id", type=int)
+    p.add_argument("caption")
+
+    p = add("report", cmd_report, "how a print went, stage by stage")
+    p.add_argument("run_id", type=int)
     p.add_argument("--json", action="store_true")
 
     p = add("inspect", cmd_inspect, "measure a mesh and check it against the printer")

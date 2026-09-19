@@ -32,6 +32,7 @@ from .design.printability import scale_advice
 from .design.render import render_to_png
 from .errors import CommandRejected, MHSError, NotSupported
 from .models import Capability, CleanOptions, PrintOptions
+from .monitor import MILESTONES, build_report, stage_name
 from .printer import Printer
 from .scheduler import parse_when
 from .slicing import INTENTS, SliceSettings, settings_for_intent
@@ -64,6 +65,9 @@ Typical flows:
 * Print something already sliced: `upload_and_print(local_path=..., confirm=True)`.
 * Print later: `schedule_print(file=..., when="2026-09-19T06:30")` - the job only
   fires while the printer is idle, and expires if the window passes.
+* Watch a print through its stages: `watch_print(run_id=...)` right after
+  starting one, then `review_print_stages` -> `read_capture` (look at each
+  frame) -> `caption_print_stage` -> `print_report`.
 * Tune settings over time: `log_print_result` after each print, then
   `list_print_history` to compare what worked.
 
@@ -596,6 +600,146 @@ def create_server(settings: Settings | None = None, *, run_scheduler: bool = Tru
             return {"ok": False, "error": "NotFound", "message": f"no run {run_id}"}
         return _ok(run=run)
 
+    # ---------------------------------------------------- watching a print
+    @server.tool()
+    async def list_print_stages() -> dict:
+        """The milestones `watch_print` can capture, and why each frame is worth having."""
+        return _ok(stages=[m.to_dict() for m in MILESTONES.values()])
+
+    @server.tool()
+    async def watch_print(
+        printer: str | None = None,
+        run_id: int | None = None,
+        poll_seconds: float | None = None,
+        stages: list[str] | None = None,
+        camera: bool = True,
+    ) -> dict:
+        """Watch a running print and capture a frame at each stage it crosses.
+
+        Start this right after `start_print` (pass its `run_id`) and leave it
+        running. It polls in the background, and at each milestone - first layer
+        finished above all - saves a photograph and writes it into the run
+        journal. Later, `review_print_stages` hands you those frames to caption
+        and `print_report` assembles the whole run.
+
+        Stops on its own when the server shuts down; `stop_watching_print` ends
+        it sooner. One watcher per printer.
+        """
+        unknown = sorted(set(stages or ()) - set(MILESTONES))
+        if unknown:
+            return _fail(CommandRejected(
+                f"unknown stage(s): {', '.join(unknown)}",
+                hint=f"Known: {', '.join(MILESTONES)}",
+            ))
+        if poll_seconds is not None and not 2 <= poll_seconds <= 600:
+            return _fail(CommandRejected("poll_seconds must be between 2 and 600"))
+        try:
+            monitor = await app.watch_print(
+                printer,
+                run_id=run_id,
+                poll_interval=poll_seconds,
+                milestones=tuple(stages) if stages else None,
+                camera=camera,
+            )
+        except MHSError as exc:
+            return _fail(exc)
+        return _ok(
+            printer=monitor.device_id,
+            run_id=monitor.run_id,
+            poll_seconds=monitor.poll_interval,
+            stages=list(monitor.watch),
+            camera=monitor.snapshot_fn is not None,
+            note=(
+                "Watching. Frames land in the run journal; review them with "
+                "review_print_stages()."
+                if monitor.snapshot_fn is not None
+                else "Watching, but this printer has no camera: stages are recorded as text only."
+            ),
+        )
+
+    @server.tool()
+    async def stop_watching_print(printer: str | None = None) -> dict:
+        """Stop the stage watcher for a printer."""
+        try:
+            monitor = await app.stop_watching(printer)
+        except MHSError as exc:
+            return _fail(exc)
+        if monitor is None:
+            return _ok(watching=False, note="nothing was being watched")
+        return _ok(watching=False, printer=monitor.device_id, captured=monitor.captured)
+
+    @server.tool()
+    async def watch_status() -> dict:
+        """Which printers are being watched, and what each has captured so far."""
+        return _ok(watching=[
+            {
+                "printer": device_id,
+                "run_id": monitor.run_id,
+                "running": monitor.running,
+                "poll_seconds": monitor.poll_interval,
+                "captured": monitor.captured,
+            }
+            for device_id, monitor in sorted(app.monitors.items())
+        ])
+
+    @server.tool()
+    async def review_print_stages(run_id: int | None = None, printer: str | None = None) -> dict:
+        """List the stage frames captured for a run, newest first.
+
+        Each entry carries an `observation_id` and an `image_path`: read the
+        image with `read_capture`, then write down what you see with
+        `caption_print_stage`. Captions are what make `print_report` readable
+        long after the frames have left the conversation.
+        """
+        rows = app.store.list_observations(run_id=run_id, device_id=printer, limit=100)
+        stages = [
+            {
+                "observation_id": row["id"],
+                "milestone": stage_name(row["kind"]),
+                "at": row.get("created_at"),
+                "layer": row.get("layer"),
+                "detail": row.get("text"),
+                "caption": row.get("caption"),
+                "image_path": row.get("image_path"),
+            }
+            for row in rows
+            if str(row.get("kind", "")).startswith("stage:")
+        ]
+        return _ok(
+            stages=stages,
+            uncaptioned=[s["observation_id"] for s in stages
+                         if s["image_path"] and not s["caption"]],
+        )
+
+    @server.tool()
+    async def caption_print_stage(observation_id: int, caption: str) -> dict:
+        """Record what you saw in a stage frame.
+
+        Say what is actually visible - "first layer down, corners flat, slight
+        under-extrusion on the left edge" - not what it ought to look like. The
+        run report is built from these.
+        """
+        if not caption.strip():
+            return _fail(CommandRejected("caption must not be empty"))
+        row = app.store.caption_observation(observation_id, caption.strip())
+        if row is None:
+            return {"ok": False, "error": "NotFound", "message": f"no observation {observation_id}"}
+        return _ok(observation=row)
+
+    @server.tool()
+    async def print_report(run_id: int) -> dict:
+        """How a print went: timeline, stage captions, and time against the estimate.
+
+        Assembles everything recorded for the run - what was sliced, what was
+        seen at each stage, how long it actually took - into one report. If it
+        lists `uncaptioned_images`, caption those first and call again.
+        """
+        run = app.store.get_run(run_id)
+        if run is None:
+            return {"ok": False, "error": "NotFound", "message": f"no run {run_id}"}
+        stages = [o for o in run["observations"] if str(o.get("kind", "")).startswith("stage:")]
+        return _ok(report=build_report(run, stages))
+
     # ------------------------------------------------------------ diagnosis
     @server.tool()
     async def check_connection(printer: str | None = None) -> dict:
@@ -1102,6 +1246,10 @@ def create_server(settings: Settings | None = None, *, run_scheduler: bool = Tru
             job_name=f"{Path(path).stem} ({intent})",
         )
         started["slice"] = estimate
+        if started.get("ok") and started.get("run_id"):
+            # Keep the slicer's prediction with the run: `print_report` measures
+            # the actual duration against it.
+            app.store.record_run_settings(started["run_id"], {"intent": intent, "slice": estimate})
         return started
 
     # ------------------------------------------------------------- vacuums

@@ -9,6 +9,16 @@ allow_raw_gcode = false
 # Where the job queue, print journal and captured frames live.
 # state_dir = "~/.local/share/mhs"
 
+# Slicing. Leave the whole section out to search the PATH for OrcaSlicer,
+# Bambu Studio or PrusaSlicer; without one, only the slicing tools are missing.
+# [slicer]
+# binary = "/Applications/OrcaSlicer.app/Contents/MacOS/OrcaSlicer"
+# profiles = ["~/.config/OrcaSlicer/user/default/A1 mini 0.4 nozzle.json"]
+
+# Watching a print through its stages (first layer, quarter, half, ...).
+[monitor]
+poll_seconds = 20             # a print is slow; polling faster only costs the MCU
+
 [printers.a1mini]
 driver = "bambu"
 model = "A1 mini"              # also sets the reported build volume

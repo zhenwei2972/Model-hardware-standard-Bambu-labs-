@@ -14,7 +14,10 @@ from pathlib import Path
 from .config import Settings, load_settings
 from .device import Device
 from .drivers import build
-from .errors import ControlDisabled
+from .errors import ControlDisabled, NotSupported
+from .models import Capability
+from .monitor import MILESTONES, PrintMonitor
+from .printer import Printer
 from .scheduler import PrintScheduler
 from .store import Store
 
@@ -60,6 +63,7 @@ class MHSApp:
         self.pool = DevicePool(self.settings)
         self.store = Store(self.settings.db_path)
         self._slicer = None
+        self.monitors: dict[str, PrintMonitor] = {}
         self.scheduler = PrintScheduler(
             self.store,
             self.pool.get,
@@ -74,8 +78,54 @@ class MHSApp:
 
     async def shutdown(self) -> None:
         await self.scheduler.stop()
+        for monitor in list(self.monitors.values()):
+            await monitor.stop()
+        self.monitors.clear()
         await self.pool.close()
         self.store.close()
+
+    # -- print monitoring --------------------------------------------------
+    async def watch_print(
+        self,
+        device_id: str | None = None,
+        *,
+        run_id: int | None = None,
+        poll_interval: float | None = None,
+        milestones: tuple[str, ...] | None = None,
+        camera: bool = True,
+    ) -> PrintMonitor:
+        """Start (or replace) the stage watcher for one printer.
+
+        One watcher per printer: starting a second would photograph the same
+        milestones twice and record both, so the existing one is stopped first.
+        """
+        device = await self.pool.get(device_id)
+        if not isinstance(device, Printer):
+            raise NotSupported(f"{device.device_id} is not a 3D printer, so it has no print stages")
+
+        await self.stop_watching(device.device_id)
+        use_camera = camera and device.supports(Capability.CAMERA_SNAPSHOT)
+        monitor = PrintMonitor(
+            store=self.store,
+            device_id=device.device_id,
+            status_fn=device.status,
+            snapshot_fn=device.snapshot if use_camera else None,
+            capture_path_fn=lambda label: self.capture_path(device.device_id, label),
+            run_id=run_id,
+            poll_interval=poll_interval or self.settings.monitor_poll_seconds,
+            watch=tuple(milestones) if milestones else tuple(MILESTONES),
+        )
+        self.monitors[device.device_id] = monitor
+        await monitor.start()
+        return monitor
+
+    async def stop_watching(self, device_id: str | None = None) -> PrintMonitor | None:
+        """Stop the watcher for a printer, if one is running."""
+        resolved = self.settings.get(device_id).device_id
+        monitor = self.monitors.pop(resolved, None)
+        if monitor is not None:
+            await monitor.stop()
+        return monitor
 
     # -- helpers -----------------------------------------------------------
     async def device(self, device_id: str | None = None) -> Device:

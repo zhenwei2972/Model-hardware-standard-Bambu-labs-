@@ -137,3 +137,17 @@ def test_mock_env_vars_configure_simulated_devices():
     )
     assert sorted(both.devices) == ["mock", "mock-vacuum"]
     assert both.default_device == "mock"  # the printer wins the default, both are reachable
+
+
+def test_monitor_poll_interval_comes_from_the_file_and_the_environment(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text(
+        '[monitor]\npoll_seconds = 45\n\n'
+        '[devices.a1]\nhost = "1.2.3.4"\nserial = "S"\naccess_code = "C"\n'
+    )
+    assert load_settings(path, env={}).monitor_poll_seconds == 45.0
+    # The environment wins, so a container can override a mounted config.
+    overridden = load_settings(path, env={"MHS_MONITOR_POLL_SECONDS": "5"})
+    assert overridden.monitor_poll_seconds == 5.0
+    assert load_settings(None, env={"MHS_CONFIG": "/nonexistent.toml",
+                                    "MHS_MOCK": "1"}).monitor_poll_seconds == 20.0

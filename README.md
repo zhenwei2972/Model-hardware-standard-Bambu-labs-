@@ -92,10 +92,22 @@ device kind.
 | Camera | `capture_snapshot` (returns the JPEG to the model), `capture_frames`, `read_capture` |
 | Scheduling | `schedule_print`, `list_scheduled_jobs`, `cancel_scheduled_job` |
 | Model | `analyze_model`, `preview_model`, `scale_model` |
+| Slicing | `list_slice_intents`, `slice_model`, `compare_slice_intents`, `slice_and_print` |
+| Stages | `watch_print`, `watch_status`, `stop_watching_print`, `list_print_stages`, `review_print_stages`, `caption_print_stage`, `print_report` |
 | Measuring | `camera_grid`, `camera_calibrate`, `camera_measure`, `read_annotated_image` |
 | Iteration | `log_print_result`, `record_observation`, `list_print_history`, `get_print_run` |
 | Resources | `mhs://printers`, `mhs://printer/{id}/status`, `mhs://printer/{id}/history`, `mhs://printer/{id}/descriptor`, `mhs://reference-objects` |
 | Prompts | `diagnose_print`, `tune_settings`, `design_iteration` |
+
+Slicing drives the slicer you already have — OrcaSlicer, Bambu Studio or
+PrusaSlicer — rather than reimplementing one. `slice_model` takes an *intent*
+(`draft`, `speed`, `balanced`, `quality`, `fine`, `strong`) whose layer height is
+derived from the printer's own nozzle and layer-height limits, and every
+individual setting is still overridable alongside it. `compare_slice_intents`
+slices the same mesh several ways and reports the slicer's own time and filament
+estimates, so "is quality worth it here?" gets a number instead of an opinion.
+Without a slicer on the `PATH` every other tool still works; only slicing needs
+one.
 
 ### Robot vacuums
 
@@ -122,11 +134,6 @@ those millimetres**, so a coordinate read off the image goes straight into
 Coordinates are checked against the map's real extent first — the protocol
 accepts anything in a wide range, and an off-map target makes the robot do
 nothing at all, which reads as a silent failure.
-
-Not included: slicing. The design tools work on `.stl`/`.obj`/`.3mf` meshes and
-stop at "ready to slice"; hand the printer a sliced plate from Bambu Studio or
-OrcaSlicer. (Driving a slicer CLI is the next step — see
-[docs/ROADMAP.md](docs/ROADMAP.md).)
 
 ## The design loop
 
@@ -158,6 +165,49 @@ fine" and "wall too thin", not every thin region in a complex part. And the
 chamber camera is off-axis with lens distortion, so measurements are good to a
 few percent with a reference object in the same plane — not caliper-grade. Both
 caveats are returned with the results rather than buried here.
+
+## Watching a print
+
+A print is not one event. The moments worth a photograph are few and
+predictable, and the first layer is worth more than all the rest put together —
+adhesion, squish, warping and a shifted origin are all visible there and nowhere
+else so cheaply.
+
+`watch_print` polls in the background and saves a frame each time the job
+crosses a stage: `start`, `first_layer`, `quarter`, `half`, `three_quarters`,
+`finished`, plus `failed`, `paused` and `alert` whenever the printer says so.
+Each stage fires **once** — crossings are computed from the transition, not the
+current value, so a state that persists for a hundred polls is recorded a single
+time, and a slow poll that skips past two stages still records both.
+
+```
+start_print(file=..., confirm=True)      -> run_id
+watch_print(run_id=...)                  -> frames start landing in the journal
+review_print_stages(run_id=...)          -> what was captured, and which frames
+                                            have no caption yet
+read_capture(path)                       -> look at one
+caption_print_stage(observation_id, "…") -> write down what is actually there
+print_report(run_id=...)                 -> the whole run: timeline, captions,
+                                            actual time vs the slicer's estimate
+```
+
+Captioning is deliberately the model's job rather than the driver's: the tool
+takes the photograph, Claude reads it, and the reading is stored as text — so
+the report is still legible long after the images have left the context window.
+The report also names what it *didn't* get (`missing_milestones`), because a
+first-layer frame that was never taken is worth knowing about.
+
+From the shell, the same thing:
+
+```bash
+mhs monitor --list-stages          # what it can capture, and why each matters
+mhs monitor --run 7                # foreground watcher, Ctrl-C to stop
+mhs stages --run 7                 # what it captured
+mhs caption 12 "flat, no lifted corners"
+mhs report 7                       # the write-up
+```
+
+Full guide: [docs/MONITORING.md](docs/MONITORING.md).
 
 ## Install
 
@@ -198,8 +248,9 @@ export BAMBU_ACCESS_CODE=12345678
 ```
 
 or copy `examples/config.example.toml` to `config.toml` (git-ignored) for
-multiple printers. Full walkthrough, including what each failure mode looks
-like: [docs/SETUP.md](docs/SETUP.md).
+multiple printers, a slicer binary and the stage-watcher's poll interval. Full
+walkthrough, including what each failure mode looks like:
+[docs/SETUP.md](docs/SETUP.md).
 
 ## Connect it to Claude
 
@@ -231,7 +282,7 @@ Three tiers. The first two need no hardware, and each stands on its own.
 Exercises every code path except the real transports:
 
 ```bash
-.venv/bin/pytest -q                  # 253 tests, no hardware required
+.venv/bin/pytest -q                  # 460 tests, no hardware required
 export MHS_MOCK=1                    # a simulated A1 mini
 .venv/bin/mhs describe               # the MHS device descriptor
 .venv/bin/mhs channels               # every read/write channel and its limits
@@ -239,6 +290,8 @@ export MHS_MOCK=1                    # a simulated A1 mini
 .venv/bin/mhs inspect your-model.stl # printability critique
 .venv/bin/mhs preview your-model.stl -o preview.png
 .venv/bin/mhs grid && .venv/bin/mhs calibrate sgd_1 100 && .venv/bin/mhs measure 0 0 200 0
+.venv/bin/mhs slice --list-intents   # what each intent trades away
+.venv/bin/mhs monitor --list-stages  # the stages a watcher captures, and why
 .venv/bin/mhs doctor
 
 # and the vacuum half, against a simulated Saros
@@ -368,6 +421,8 @@ src/mhs/
   config.py          TOML + env configuration  store.py    SQLite: jobs, journal,
   scheduler.py       deferred prints                       calibration, locations
   app.py             pool + store + scheduler  server.py   the MCP surface
+  monitor.py         print stages and the run report
+  slicing/           parameters.py (intents), slicer.py (the slicer CLI driver)
   cli.py             the same capabilities for humans
   standard/          channels.py (limits), descriptor.py (the MHS reference file)
   design/            mesh.py (STL/OBJ/3MF), render.py (z-buffer rasteriser),
@@ -377,7 +432,7 @@ src/mhs/
   drivers/roborock/  client.py (credentials) commands.py state.py vacuum.py
   drivers/mock.py    simulated printer         drivers/mock_vacuum.py  simulated robot
 docs/                PROTOCOL.md, SETUP.md, ROBOROCK.md, DESIGN_LOOP.md,
-                     MHS_ALIGNMENT.md, PUBLISHING.md, ROADMAP.md
+                     MONITORING.md, MHS_ALIGNMENT.md, PUBLISHING.md, ROADMAP.md
 ```
 
 ## Tests
@@ -389,9 +444,10 @@ ruff check .
 
 The parts that are expensive to debug against a real machine are tested
 directly: command payloads, delta-merged telemetry, camera framing, FTPS path
-safety, scheduler windows, channel safety limits, and the geometry - mesh volume
-and area are checked against analytic values, and the renderer against known
-occlusion cases.
+safety, scheduler windows, channel safety limits, slicer argument construction,
+milestone detection (each stage fires exactly once, and a slow poll loses
+nothing), and the geometry - mesh volume and area are checked against analytic
+values, and the renderer against known occlusion cases.
 
 ## Publishing
 

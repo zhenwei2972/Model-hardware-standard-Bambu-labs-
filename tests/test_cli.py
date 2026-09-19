@@ -309,3 +309,54 @@ def test_slice_list_intents(cli_env, capsys):
     out = capsys.readouterr().out
     assert "draft" in out and "quality" in out
     assert "trade:" in out       # every intent states its cost
+
+
+# -- print stage monitoring -------------------------------------------------
+def test_monitor_lists_the_stages_without_touching_the_printer(cli_env, capsys):
+    assert run(["monitor", "--list-stages"]) == 0
+    out = capsys.readouterr().out
+    assert "first_layer" in out and "adhesion" in out
+
+
+def test_stages_caption_and_report(cli_env, capsys):
+    """The path a human (or Claude) walks after a print: look, caption, read."""
+    from mhs.app import MHSApp
+
+    app = MHSApp()
+    run_id = app.store.start_run("mock", job_name="benchy",
+                                 settings={"estimated_time_minutes": 60})
+    obs = app.store.add_observation("mock", kind="stage:first_layer", run_id=run_id,
+                                    layer=2, text="layer 1 complete",
+                                    image_path="/frames/a.jpg")
+    app.store.close()
+
+    assert run(["stages", "--run", str(run_id)]) == 0
+    listed = capsys.readouterr().out
+    assert "first_layer" in listed and "/frames/a.jpg" in listed
+
+    assert run(["caption", str(obs), "flat, well squished"]) == 0
+    assert "flat, well squished" in capsys.readouterr().out
+
+    assert run(["report", str(run_id)]) == 0
+    report = capsys.readouterr().out
+    assert "benchy" in report and "flat, well squished" in report
+    assert "never captured" in report  # no finished frame was ever taken
+
+
+def test_report_json_carries_the_timeline(cli_env, capsys):
+    from mhs.app import MHSApp
+
+    app = MHSApp()
+    run_id = app.store.start_run("mock", job_name="benchy")
+    app.store.add_observation("mock", kind="stage:start", run_id=run_id, text="started")
+    app.store.close()
+
+    assert run(["report", str(run_id), "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert [row["milestone"] for row in payload["timeline"]] == ["start"]
+
+
+def test_report_and_caption_fail_loudly_on_an_unknown_id(cli_env, capsys):
+    assert run(["report", "404"]) == 1
+    assert run(["caption", "404", "nothing here"]) == 1
+    assert "404" in capsys.readouterr().err

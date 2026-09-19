@@ -5,15 +5,16 @@ difficulty.
 
 ## Next
 
-* **Slicer driver.** Shell out to `bambu-studio --slice` / OrcaSlicer CLI so the
-  design loop runs end to end without leaving the session: `analyze_model` ->
-  `scale_model` -> slice -> print. It also gives the model a real settings knob
-  (load a profile, override layer height or temperature), which is the missing
-  half of settings iteration.
-* **Vision loop as a first-class tool.** `watch_print(printer, until_layer=...)`
-  that samples frames, calls back into the model at checkpoints, and can pause
-  the job on a confident failure verdict. The pieces (`capture_frames`,
-  `pause_print`, the journal) are here; the loop is not.
+* **Acting on what the camera shows.** `watch_print` now captures a frame at each
+  stage and `print_report` assembles the run, but nothing reacts: the model has
+  to be asked to look. Waking the model at a milestone - MCP sampling, or a
+  resource-update notification - and letting it pause the job on a confident
+  failure verdict is the remaining half. The pieces (`pause_print`, captions,
+  the journal) are all here.
+* **Cross-run learning.** The journal holds slice settings, stage captions and
+  outcomes for every print. Nothing yet reads across runs to say "the last three
+  prints at 0.28 mm all show the same first-layer gap"; a tool that does would
+  turn the record into advice.
 * **Network discovery.** MHS describes devices and agents finding each other
   across a network. Printers are currently named in config; advertising over
   mDNS and discovering them would close that gap (see
