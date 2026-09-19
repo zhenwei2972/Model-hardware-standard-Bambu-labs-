@@ -301,3 +301,11 @@ def test_doctor_survives_a_driver_bug(cli_env, capsys, monkeypatch):
     out = capsys.readouterr().out
     assert "files      ERROR RuntimeError: driver bug" in out
     assert "camera     ok" in out       # the check after the crash still ran
+
+
+# -- slicing -----------------------------------------------------------------
+def test_slice_list_intents(cli_env, capsys):
+    assert run(["slice", "--list-intents"]) == 0
+    out = capsys.readouterr().out
+    assert "draft" in out and "quality" in out
+    assert "trade:" in out       # every intent states its cost

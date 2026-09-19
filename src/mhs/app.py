@@ -59,6 +59,7 @@ class MHSApp:
         self.settings = settings or load_settings()
         self.pool = DevicePool(self.settings)
         self.store = Store(self.settings.db_path)
+        self._slicer = None
         self.scheduler = PrintScheduler(
             self.store,
             self.pool.get,
@@ -87,6 +88,26 @@ class MHSApp:
     def require_writable(self, action: str) -> None:
         if self.settings.read_only:
             raise ControlDisabled(f"refusing to {action}: this MHS server runs read-only")
+
+    def slicer(self):
+        """The configured slicer, resolved on first use.
+
+        Built lazily so that a setup with no slicer installed still starts and
+        serves every other tool - slicing is the only thing that needs it.
+        """
+        from .slicing import Slicer
+
+        if self._slicer is None:
+            self._slicer = Slicer.discover(
+                self.settings.slicer_binary,
+                profiles=tuple(Path(p).expanduser() for p in self.settings.slicer_profiles),
+            )
+        return self._slicer
+
+    def slice_path(self, stem: str, suffix: str) -> Path:
+        directory = self.settings.state_dir / "sliced"
+        directory.mkdir(parents=True, exist_ok=True)
+        return directory / f"{stem}{suffix}"
 
     def capture_path(self, device_id: str, label: str = "frame") -> Path:
         directory = self.settings.capture_dir / device_id

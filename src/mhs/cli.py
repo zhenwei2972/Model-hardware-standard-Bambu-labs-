@@ -349,6 +349,51 @@ async def cmd_scale(app, args) -> int:
     return 0
 
 
+# -- slicing commands ------------------------------------------------------
+async def cmd_slice(app, args) -> int:
+    from .slicing import INTENTS, SliceSettings, settings_for_intent
+
+    spec = spec_for(app.settings.get(args.printer).model if app.settings.devices else None)
+    if args.list_intents:
+        for name, intent in INTENTS.items():
+            resolved, _ = settings_for_intent(name, spec)
+            print(f"{name:9} {intent.summary}")
+            print(f"          {resolved.to_dict()}")
+            if intent.trade:
+                print(f"          trade: {intent.trade}")
+        return 0
+
+    overrides = SliceSettings(
+        layer_height_mm=args.layer_height,
+        infill_percent=args.infill,
+        wall_loops=args.walls,
+        supports=args.supports,
+    )
+    slicer = app.slicer()
+    suffix = ".gcode" if slicer.flavour.value == "prusaslicer" else ".gcode.3mf"
+
+    names = args.compare or [args.intent]
+    rows = []
+    for name in names:
+        settings, meta = settings_for_intent(name, spec, overrides=overrides)
+        target = Path(args.output) if (args.output and len(names) == 1) else app.slice_path(
+            f"{Path(args.path).stem}-{name}", suffix
+        )
+        result = slicer.slice(args.path, target, settings)
+        rows.append((name, meta, result))
+        print(f"{name:9} {result.summary()}")
+        print(f"          -> {result.output_path}")
+
+    if len(rows) > 1:
+        timed = [(n, r) for n, _m, r in rows if r.estimated_time_minutes]
+        if len(timed) > 1:
+            fast = min(timed, key=lambda t: t[1].estimated_time_minutes)
+            slow = max(timed, key=lambda t: t[1].estimated_time_minutes)
+            ratio = slow[1].estimated_time_minutes / fast[1].estimated_time_minutes
+            print(f"\n{slow[0]} is {ratio:.1f}x the time of {fast[0]}.")
+    return 0
+
+
 # -- vacuum commands -------------------------------------------------------
 async def _vacuum(app, args):
     from .vacuum import Vacuum
@@ -716,6 +761,18 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("target_mm", type=float)
     p.add_argument("--axis", default="max", choices=["x", "y", "z", "max", "min"])
     p.add_argument("--apply", action="store_true", help="write the scaled STL")
+    p.add_argument("-o", "--output")
+
+    p = add("slice", cmd_slice, "slice a mesh with an intent (draft/quality/strong/...)")
+    p.add_argument("path", nargs="?", help="the .stl/.obj/.3mf to slice")
+    p.add_argument("--intent", default="balanced")
+    p.add_argument("--compare", nargs="+", metavar="INTENT",
+                   help="slice several ways and compare the time")
+    p.add_argument("--list-intents", action="store_true")
+    p.add_argument("--layer-height", type=float)
+    p.add_argument("--infill", type=float, metavar="PERCENT")
+    p.add_argument("--walls", type=int)
+    p.add_argument("--supports", action=argparse.BooleanOptionalAction)
     p.add_argument("-o", "--output")
 
     p = add("describe", cmd_describe, "print the MHS device descriptor")

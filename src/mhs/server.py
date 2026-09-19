@@ -34,6 +34,7 @@ from .errors import CommandRejected, MHSError, NotSupported
 from .models import Capability, CleanOptions, PrintOptions
 from .printer import Printer
 from .scheduler import parse_when
+from .slicing import INTENTS, SliceSettings, settings_for_intent
 from .specs import spec_for
 from .standard.descriptor import descriptor_markdown
 from .vacuum import Vacuum
@@ -54,7 +55,9 @@ Typical flows:
   `go_to(x_mm=..., y_mm=..., confirm=True)`, or `go_to(location="kitchen")`.
 * Clean a room: `list_rooms`, then `start_cleaning(rooms=["kitchen"], confirm=True)`.
 * Design loop: `analyze_model` -> `preview_model` (look at it) -> `scale_model` ->
-  print -> `camera_grid` + `camera_measure` to check the result against the model.
+  `slice_model` -> print -> `camera_grid` + `camera_measure` to check the result.
+* Weigh a trade-off in real numbers: `compare_slice_intents` slices the same
+  model at several settings and reports each one's time and filament.
 * Size something against a real object: put a coin on the plate, `camera_grid`,
   read the coin's span in pixels off the grid, `camera_calibrate`, then
   `camera_measure` anything else in that frame.
@@ -65,8 +68,8 @@ Typical flows:
   `list_print_history` to compare what worked.
 
 Constraints worth knowing before you act:
-* Files must be sliced (.3mf/.gcode) already; this server does not slice. The
-  design tools work on .stl/.obj/.3mf meshes and stop at "ready to slice".
+* `slice_model` drives an installed OrcaSlicer/Bambu Studio/PrusaSlicer. Without
+  one on the PATH every other tool still works; only slicing needs it.
 * Camera measurements are estimates from an off-axis camera: good to a few
   percent with a reference object in the same plane, not caliper-grade.
 * Physical actions need `confirm=True`.
@@ -911,6 +914,195 @@ def create_server(settings: Settings | None = None, *, run_scheduler: bool = Tru
         except MHSError as exc:
             return _fail(exc)
         return _ok(channel=channel, value=value, result=result)
+
+    # ------------------------------------------------------------- slicing
+    def _slice_overrides(
+        layer_height_mm: float | None,
+        infill_percent: float | None,
+        wall_loops: int | None,
+        supports: bool | None,
+        brim_width_mm: float | None,
+        perimeter_speed_mm_s: float | None,
+        infill_speed_mm_s: float | None,
+    ) -> SliceSettings:
+        return SliceSettings(
+            layer_height_mm=layer_height_mm,
+            infill_percent=infill_percent,
+            wall_loops=wall_loops,
+            supports=supports,
+            brim_width_mm=brim_width_mm,
+            perimeter_speed_mm_s=perimeter_speed_mm_s,
+            infill_speed_mm_s=infill_speed_mm_s,
+        )
+
+    @server.tool()
+    async def list_slice_intents(printer: str | None = None) -> dict:
+        """The named slicing trade-offs, and what each resolves to on this printer.
+
+        Layer heights are derived from the machine's own nozzle and layer-height
+        limits, so the same intent means something different on a 0.2 mm nozzle
+        than on a 0.4 mm one.
+        """
+        spec = spec_for(app.settings.get(printer).model if app.settings.devices else None)
+        out = []
+        for name, intent in INTENTS.items():
+            settings, _ = settings_for_intent(name, spec)
+            out.append({**intent.to_dict(), "resolves_to": settings.to_dict()})
+        return _ok(printer=spec.model, intents=out,
+                   note="Any individual setting can still be overridden alongside the intent.")
+
+    @server.tool()
+    async def slice_model(
+        path: str,
+        intent: str = "balanced",
+        printer: str | None = None,
+        output_path: str | None = None,
+        layer_height_mm: float | None = None,
+        infill_percent: float | None = None,
+        wall_loops: int | None = None,
+        supports: bool | None = None,
+        brim_width_mm: float | None = None,
+        perimeter_speed_mm_s: float | None = None,
+        infill_speed_mm_s: float | None = None,
+    ) -> dict:
+        """Slice a mesh into a file the printer can run.
+
+        `intent` picks the trade-off - draft, speed, balanced, quality, fine or
+        strong (see `list_slice_intents`) - and any named setting overrides it.
+        Returns the slicer's own estimate of time and filament, and what it
+        actually applied, which is how a wrong profile becomes visible before
+        anything is printed.
+        """
+        try:
+            file = _model_path(path)
+            spec = spec_for(app.settings.get(printer).model if app.settings.devices else None)
+            overrides = _slice_overrides(
+                layer_height_mm, infill_percent, wall_loops, supports, brim_width_mm,
+                perimeter_speed_mm_s, infill_speed_mm_s,
+            )
+            settings, chosen = settings_for_intent(intent, spec, overrides=overrides)
+            slicer = app.slicer()
+            target = (
+                Path(output_path).expanduser() if output_path
+                else app.slice_path(
+                    file.stem + f"-{chosen.name}",
+                    ".gcode" if slicer.flavour.value == "prusaslicer" else ".gcode.3mf",
+                )
+            )
+            result = await asyncio.to_thread(slicer.slice, file, target, settings)
+        except MHSError as exc:
+            return _fail(exc)
+        return _ok(
+            summary=result.summary(),
+            intent=chosen.to_dict(),
+            slice=result.to_dict(),
+            next_step="upload_and_print(local_path=...) to print it, "
+                      "or compare_slice_intents to weigh the alternatives.",
+        )
+
+    @server.tool()
+    async def compare_slice_intents(
+        path: str,
+        intents: list[str] | None = None,
+        printer: str | None = None,
+    ) -> dict:
+        """Slice the same model several ways and report the trade-off in real numbers.
+
+        This is how to answer "is quality worth it here?" - the slicer's own
+        time and filament estimates for each intent, side by side, rather than
+        a guess. Slicing is a file operation; nothing is sent to the printer.
+        """
+        chosen = intents or ["draft", "balanced", "quality"]
+        try:
+            file = _model_path(path)
+            spec = spec_for(app.settings.get(printer).model if app.settings.devices else None)
+            slicer = app.slicer()
+        except MHSError as exc:
+            return _fail(exc)
+
+        rows, failures = [], []
+        for name in chosen:
+            try:
+                settings, meta = settings_for_intent(name, spec)
+                target = app.slice_path(
+                    f"{file.stem}-{name}",
+                    ".gcode" if slicer.flavour.value == "prusaslicer" else ".gcode.3mf",
+                )
+                result = await asyncio.to_thread(slicer.slice, file, target, settings)
+            except MHSError as exc:
+                failures.append({"intent": name, "error": exc.message})
+                continue
+            rows.append({
+                "intent": name,
+                "summary": meta.summary,
+                "trade": meta.trade,
+                "minutes": result.estimated_time_minutes,
+                "filament_cm3": result.filament_cm3,
+                "layer_height_mm": settings.layer_height_mm,
+                "infill_percent": settings.infill_percent,
+                "wall_loops": settings.wall_loops,
+                "output_path": str(result.output_path),
+            })
+        if not rows:
+            return _fail(CommandRejected(
+                "every intent failed to slice",
+                hint="; ".join(f["error"] for f in failures) or None,
+            ))
+
+        timed = [r for r in rows if r["minutes"]]
+        verdict = None
+        if len(timed) > 1:
+            fastest = min(timed, key=lambda r: r["minutes"])
+            slowest = max(timed, key=lambda r: r["minutes"])
+            verdict = (
+                f"{slowest['intent']} takes {slowest['minutes']} min against "
+                f"{fastest['intent']}'s {fastest['minutes']} min - "
+                f"{slowest['minutes'] / fastest['minutes']:.1f}x the time for "
+                f"{slowest['layer_height_mm']:g} mm layers instead of "
+                f"{fastest['layer_height_mm']:g} mm."
+            )
+        return _ok(model=file.name, comparison=rows, failed=failures, verdict=verdict)
+
+    @server.tool()
+    async def slice_and_print(
+        path: str,
+        confirm: bool = False,
+        intent: str = "balanced",
+        printer: str | None = None,
+        layer_height_mm: float | None = None,
+        infill_percent: float | None = None,
+        wall_loops: int | None = None,
+        supports: bool | None = None,
+    ) -> dict:
+        """Slice a mesh, upload it and start printing, in one step.
+
+        The whole chain from a .stl to a running print. Requires `confirm=True`;
+        the slice happens first either way, so a dry run still tells you what it
+        would cost in time and filament.
+        """
+        sliced = await slice_model(
+            path=path, intent=intent, printer=printer, layer_height_mm=layer_height_mm,
+            infill_percent=infill_percent, wall_loops=wall_loops, supports=supports,
+        )
+        if not sliced.get("ok"):
+            return sliced
+        estimate = sliced["slice"]
+        if not confirm:
+            return {
+                "ok": False,
+                "error": "ConfirmationRequired",
+                "message": f"Would print {Path(path).name} at intent '{intent}': "
+                           f"{estimate.get('estimated_time') or 'unknown time'}, "
+                           f"{estimate.get('filament_cm3') or '?'} cm3 of filament.",
+                "hint": "Call again with confirm=true once the plate is clear.",
+                "slice": estimate,
+            }
+        started = await upload_and_print(
+            local_path=estimate["output_path"], confirm=True, printer=printer,
+            job_name=f"{Path(path).stem} ({intent})",
+        )
+        started["slice"] = estimate
+        return started
 
     # ------------------------------------------------------------- vacuums
     async def _resolve_rooms(device: Vacuum, wanted: list) -> list[int]:
