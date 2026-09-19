@@ -12,9 +12,9 @@ allow_raw_gcode = false
 [printers.a1mini]
 driver = "bambu"
 model = "A1 mini"              # also sets the reported build volume
-host = "192.168.1.42"          # printer screen -> Settings -> Network
-serial = "01P00A000000000"     # sticker on the back; used as the TLS cert name
-access_code = "12345678"       # 8 characters, same screen as the IP
+host = "192.168.1.42"          # printer screen -> Settings -> WLAN
+serial = "0309CA1234567890"    # rear sticker or Settings > Device; the TLS cert name
+access_code = "12345678"       # 8 chars, shown once LAN Only Mode is on
 upload_dir = "cache"           # where uploads land on the printer
 tls_mode = "verify"            # verify | ca_only | insecure
 

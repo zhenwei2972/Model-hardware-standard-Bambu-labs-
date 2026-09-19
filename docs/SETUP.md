@@ -2,26 +2,36 @@
 
 ## 1. Put the printer in LAN Only Mode + Developer Mode
 
-On the printer's touchscreen: **Settings (gear) → General**
+On the A1 / A1 mini touchscreen the toggles live under the **network** screen,
+not the general one:
+
+**Settings (gear) → WLAN**
+
+1. Toggle **LAN Only Mode** on.
+2. **Power-cycle the printer.** Developer Mode does not appear until it has
+   restarted — this step is easy to miss and it looks like the option is absent.
+3. Back in Settings → WLAN, toggle **Developer Mode** on.
 
 | Toggle | Why |
 | --- | --- |
-| **LAN Only Mode** | Keeps MQTT/FTPS/camera served locally. |
+| **LAN Only Mode** | Serves MQTT/FTPS/camera on your network, and is what makes the Access Code appear. |
 | **Developer Mode** | Since firmware `01.05.00.00` on the A1 series, Bambu's *Authorization Control System* blocks third-party **control** (start/stop/heat/move) unless this is on. Monitoring still works without it. |
-| **LAN Mode Liveview** | Required for the camera stream on tcp/6000. |
 
-The printer reboots its network stack after these changes; give it a minute.
+> **LAN Only Mode disconnects the printer from Bambu's cloud, so the Bambu
+> Handy phone app stops working with it.** Bambu Studio on the same network
+> still does, and so does this server. Turning LAN Only Mode back off restores
+> Handy; nothing has to be re-paired.
 
 > If control commands come back with `acknowledged: false` while status keeps
-> updating, this is almost always the cause.
+> updating, Developer Mode is off (or the power-cycle was skipped).
 
 ## 2. Collect three values
 
 | Value | Where |
 | --- | --- |
-| **IP address** | Printer screen → Settings → Network (or your router's DHCP table). Give it a DHCP reservation — the config is static. |
-| **Access Code** | Same screen. 8 characters. It changes if you re-pair or factory reset. |
-| **Serial number** | Sticker on the back, or Bambu Studio → Device → printer info. Used as the TLS certificate name, so it must be exact. |
+| **IP address** | Settings → WLAN, on the same screen. Give it a DHCP reservation in your router — the config stores it statically. |
+| **Access Code** | Settings → WLAN, visible once LAN Only Mode is on. 8 characters. If it reads all zeros, toggle LAN Only Mode off and on again to regenerate it. It also changes on re-pair or factory reset. |
+| **Serial number** | Sticker on the back of the printer, **Settings → Device** on the touchscreen, or Bambu Studio → Device. An A1 mini serial starts `030`. It is the TLS certificate name, so it must be exact. |
 
 ## 3. Configure
 
@@ -34,7 +44,7 @@ or, without a file:
 
 ```bash
 export BAMBU_HOST=192.168.1.42
-export BAMBU_SERIAL=01P00A000000000
+export BAMBU_SERIAL=0309CA1234567890
 export BAMBU_ACCESS_CODE=12345678
 ```
 
@@ -63,7 +73,7 @@ all good
 | Symptom | Cause / fix |
 | --- | --- |
 | all three ports closed | Wrong IP, printer asleep, or client isolation / different VLAN on the Wi-Fi. |
-| tcp/6000 closed only | LAN Mode Liveview is off. |
+| tcp/6000 closed only | The camera is not being served: re-check LAN Only Mode, and power-cycle once. |
 | `CERTIFICATE_VERIFY_FAILED` | Certificate CN does not match the serial you configured. Re-check the serial; if it still fails, set `tls_mode = "ca_only"`. |
 | MQTT connects, commands do nothing | Developer Mode off (see step 1). |
 | FTPS login refused | Wrong Access Code — it changes after re-pairing. |

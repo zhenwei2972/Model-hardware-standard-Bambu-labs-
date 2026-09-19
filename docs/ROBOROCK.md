@@ -44,13 +44,29 @@ Roborock's API is on the internet.
 
 ```bash
 pip install -e ".[roborock]"
-mhs roborock-login                 # asks for the email and password
-# or, if the account uses a one-time code:
-mhs roborock-login --code
+mhs roborock-login --code          # recommended: Roborock emails you a code
+# or, if the account has a password you set yourself:
+mhs roborock-login
 ```
 
-The password is read without echo and discarded after the exchange. The token
-lands in the state directory (`~/.local/share/mhs/roborock-credentials.json`).
+**Use `--code` unless you know the account has a password.** Roborock accounts
+can be created with a phone number, or through Apple/Google sign-in, and those
+have no password to give. The code path works for any account that has an email
+address on it.
+
+Two things to check in the Roborock phone app first, under **Profile**:
+
+* the account has an **email address** on it, not only a phone number — the API
+  authenticates by email, and a phone-only account cannot log in at all;
+* the robot appears in the app and has **finished a mapping run**, otherwise
+  there are no rooms and no coordinates to aim at.
+
+The region (`usiot` / `euiot` / `cniot` / `ruiot`) is detected automatically;
+`base_url` only exists to pin it if that ever guesses wrong.
+
+The password, when used, is read without echo and discarded after the exchange.
+The token lands in the state directory
+(`~/.local/share/mhs/roborock-credentials.json`, mode 600).
 
 Then add the device:
 

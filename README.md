@@ -174,13 +174,18 @@ python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"
 For a vacuum instead, see [docs/ROBOROCK.md](docs/ROBOROCK.md) — it is a
 different setup (an account token, not a LAN code).
 
-On the printer's touchscreen: **Settings → General**
+On the A1 / A1 mini touchscreen: **Settings (gear) → WLAN** — the network
+screen, not the general one.
 
-| Toggle | Needed for |
-| --- | --- |
-| **LAN Only Mode** | serving MQTT/FTPS locally |
-| **Developer Mode** | *control* — without it, firmware ≥ 01.05 on the A1 series silently ignores start/stop/heat commands |
-| **LAN Mode Liveview** | the chamber camera on tcp/6000 |
+1. Toggle **LAN Only Mode** on — this is also what makes the Access Code appear.
+2. **Power-cycle the printer.** Developer Mode does not show up until it has
+   restarted.
+3. Back in Settings → WLAN, toggle **Developer Mode** on — without it, firmware
+   ≥ 01.05 on the A1 series silently ignores start/stop/heat commands.
+
+Note that LAN Only Mode cuts the printer off from Bambu's cloud, so **the Bambu
+Handy phone app stops working with it**. Bambu Studio on the same network is
+unaffected, and turning the mode back off restores Handy with no re-pairing.
 
 Then collect three values — **IP address** and **Access Code** from
 Settings → Network, and the **serial number** from the sticker or Bambu Studio →
@@ -188,7 +193,7 @@ Device (it is the TLS certificate name, so it must match exactly):
 
 ```bash
 export BAMBU_HOST=192.168.1.42
-export BAMBU_SERIAL=01P00A000000000
+export BAMBU_SERIAL=0309CA1234567890
 export BAMBU_ACCESS_CODE=12345678
 ```
 
@@ -201,7 +206,7 @@ like: [docs/SETUP.md](docs/SETUP.md).
 ```bash
 claude mcp add mhs \
   --env BAMBU_HOST=192.168.1.42 \
-  --env BAMBU_SERIAL=01P00A000000000 \
+  --env BAMBU_SERIAL=0309CA1234567890 \
   --env BAMBU_ACCESS_CODE=12345678 \
   --env MHS_READ_ONLY=1 \
   -- "$PWD/.venv/bin/mhs-mcp"
@@ -285,7 +290,7 @@ all good
 | Symptom | Cause |
 | --- | --- |
 | all three ports closed | wrong IP, printer asleep, or Wi-Fi client isolation / separate VLAN |
-| tcp/6000 closed only | LAN Mode Liveview is off |
+| tcp/6000 closed only | camera not served — re-check LAN Only Mode and power-cycle once |
 | `CERTIFICATE_VERIFY_FAILED` | serial mismatch — re-check it, or set `tls_mode = "ca_only"` |
 | FTPS login refused | wrong Access Code (it changes after re-pairing) |
 | telemetry fine, commands `acknowledged: false` | Developer Mode is off |
