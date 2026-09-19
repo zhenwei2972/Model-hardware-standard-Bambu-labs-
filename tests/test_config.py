@@ -121,3 +121,19 @@ def test_legacy_printers_table_and_default_still_load(tmp_path):
     settings = load_settings(path, env={})
     assert settings.default_device == "a1"
     assert settings.get().host == "1.2.3.4"
+
+
+def test_mock_env_vars_configure_simulated_devices():
+    printer_only = load_settings(None, env={"MHS_MOCK": "1", "MHS_CONFIG": "/nonexistent.toml"})
+    assert printer_only.get().driver == "mock"
+
+    vacuum_only = load_settings(
+        None, env={"MHS_MOCK_VACUUM": "1", "MHS_CONFIG": "/nonexistent.toml"}
+    )
+    assert vacuum_only.get().driver == "mock_vacuum"
+
+    both = load_settings(
+        None, env={"MHS_MOCK": "1", "MHS_MOCK_VACUUM": "1", "MHS_CONFIG": "/nonexistent.toml"}
+    )
+    assert sorted(both.devices) == ["mock", "mock-vacuum"]
+    assert both.default_device == "mock"  # the printer wins the default, both are reachable

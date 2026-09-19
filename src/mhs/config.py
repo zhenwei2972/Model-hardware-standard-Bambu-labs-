@@ -172,9 +172,17 @@ def load_settings(path: str | Path | None = None, env: dict | None = None) -> Se
         )
         settings.default_device = settings.default_device or pid
 
+    # Simulated devices, so every tool can be tried before touching hardware.
     if _as_bool(env.get("MHS_MOCK")):
-        settings.devices["mock"] = DeviceConfig(device_id="mock", driver="mock", model="MHS Mock A1 mini")
+        settings.devices["mock"] = DeviceConfig(
+            device_id="mock", driver="mock", model="MHS Mock A1 mini"
+        )
         settings.default_device = settings.default_device or "mock"
+    if _as_bool(env.get("MHS_MOCK_VACUUM")):
+        settings.devices["mock-vacuum"] = DeviceConfig(
+            device_id="mock-vacuum", driver="mock_vacuum", model="Saros 10"
+        )
+        settings.default_device = settings.default_device or "mock-vacuum"
 
     if env.get("MHS_READ_ONLY") is not None:
         settings.read_only = _as_bool(env.get("MHS_READ_ONLY"))
