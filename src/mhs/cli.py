@@ -107,8 +107,32 @@ async def cmd_files(app, args) -> int:
     return 0
 
 
+def _warn_about(app, device_id: str, local_path: str, plate: int = 1) -> None:
+    """Say what a sliced file gets wrong, before it reaches the machine.
+
+    Printed rather than raised: sending the file is the operator's call, but a
+    bed temperature the filament cannot stick to is worth hearing about first.
+    The printer runs the whole job either way and reports success.
+    """
+    from .preflight import preflight
+
+    try:
+        plate_type = app.settings.devices[device_id].plate_type
+    except KeyError:
+        plate_type = ""
+    try:
+        _, findings = preflight(local_path, plate=plate, plate_type=plate_type)
+    except Exception:  # noqa: BLE001 - a file we cannot parse is not an error here
+        return
+    for finding in findings:
+        print(f"{finding.severity}: {finding.message}", file=sys.stderr)
+        if finding.suggestion:
+            print(f"hint:  {finding.suggestion}", file=sys.stderr)
+
+
 async def cmd_upload(app, args) -> int:
     printer = await _printer(app, args)
+    _warn_about(app, printer.device_id, args.local_path)
     entry = await printer.upload_file(args.local_path, args.name)
     print(f"uploaded {entry.path} ({entry.size_bytes or 0} bytes)")
     return 0

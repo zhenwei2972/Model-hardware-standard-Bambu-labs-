@@ -30,8 +30,10 @@ from .design import vision
 from .design.printability import analyze as analyze_print
 from .design.printability import scale_advice
 from .design.render import render_to_png
+from .design.vision import frame_is_dark
 from .errors import CommandRejected, MHSError, NotSupported
 from .models import Capability, CleanOptions, PrintOptions
+from .preflight import preflight
 from .printer import Printer
 from .scheduler import parse_when
 from .specs import spec_for
@@ -115,6 +117,46 @@ def create_server(settings: Settings | None = None, *, run_scheduler: bool = Tru
                      "`printer` argument.",
             )
         return device
+
+    def _preflight_findings(local_path: str, device_id: str, plate: int) -> list[dict]:
+        """Read a sliced file before sending it, and say what looks wrong.
+
+        Never raises: a file we cannot parse is not a reason to refuse a print,
+        it just means we have nothing to say about it.
+        """
+        try:
+            plate_type = app.settings.devices[device_id].plate_type
+        except KeyError:
+            plate_type = ""
+        try:
+            _, findings = preflight(local_path, plate=plate, plate_type=plate_type)
+        except Exception as exc:  # noqa: BLE001 - diagnostics must not block printing
+            log.debug("preflight skipped for %s: %s", local_path, exc)
+            return []
+        return [f.to_dict() for f in findings]
+
+    async def _lit_frame(device: Printer) -> bytes:
+        """Grab a frame, turning the chamber light on if the first one is dark.
+
+        The camera has no low-light mode: with the light off the frame is a
+        near-black rectangle that says nothing about the print. The light is put
+        back the way it was found.
+        """
+        frame = await device.snapshot()
+        if not frame_is_dark(frame):
+            return frame
+        try:
+            was_on = (await device.status()).lights.get("chamber_light") == "on"
+            if was_on:
+                return frame
+            await device.set_light(True)
+            await asyncio.sleep(1.0)
+            lit = await device.snapshot()
+            await device.set_light(False)
+        except MHSError as exc:
+            log.debug("could not light the chamber for a snapshot: %s", exc)
+            return frame
+        return lit
 
     async def _vacuum(device_id: str | None) -> Vacuum:
         device = await app.device(device_id)
@@ -281,8 +323,15 @@ def create_server(settings: Settings | None = None, *, run_scheduler: bool = Tru
         flow_calibration: bool = True,
         timelapse: bool = False,
         job_name: str | None = None,
+        ignore_preflight: bool = False,
     ) -> dict:
-        """Upload a sliced file and immediately print it. Requires `confirm=True`."""
+        """Upload a sliced file and immediately print it. Requires `confirm=True`.
+
+        The file is read before it is sent: a file sliced for the wrong plate
+        heats the bed to a temperature the filament will not stick to, and the
+        printer cannot tell. Blockers refuse the job; pass
+        `ignore_preflight=True` to print anyway.
+        """
         if not confirm:
             return {
                 "ok": False,
@@ -294,6 +343,22 @@ def create_server(settings: Settings | None = None, *, run_scheduler: bool = Tru
             app.require_writable("start a print")
             device = await _printer(printer)
             device.require(Capability.FILE_UPLOAD)
+        except MHSError as exc:
+            return _fail(exc)
+
+        checks = _preflight_findings(local_path, device.device_id, plate)
+        blockers = [f for f in checks if f["severity"] == "blocker"]
+        if blockers and not ignore_preflight:
+            return {
+                "ok": False,
+                "error": "PreflightFailed",
+                "message": blockers[0]["message"],
+                "hint": blockers[0]["suggestion"],
+                "findings": checks,
+                "note": "Pass ignore_preflight=true to print it anyway.",
+            }
+
+        try:
             entry = await device.upload_file(local_path)
         except MHSError as exc:
             return _fail(exc)
@@ -310,6 +375,8 @@ def create_server(settings: Settings | None = None, *, run_scheduler: bool = Tru
             job_name=job_name or entry.name,
         )
         started["uploaded"] = entry.to_dict()
+        if checks:
+            started["preflight"] = checks
         return started
 
     @server.tool()
@@ -414,10 +481,13 @@ def create_server(settings: Settings | None = None, *, run_scheduler: bool = Tru
 
         Use it to actually look at the print: first-layer adhesion, stringing,
         spaghetti, whether the plate is clear before starting a job.
+
+        If the chamber is dark the light is switched on for the shot and then
+        switched back off, so the frame is worth looking at either way.
         """
         device = await _printer(printer)
         device.require(Capability.CAMERA_SNAPSHOT)
-        frame = await device.snapshot()
+        frame = await _lit_frame(device)
         if save:
             path = app.capture_path(device.device_id, label)
             path.write_bytes(frame)
