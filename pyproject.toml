@@ -11,8 +11,9 @@ requires-python = ">=3.10"
 license = { file = "LICENSE" }
 authors = [{ name = "zhenwei2972" }]
 keywords = [
-  "mcp", "mhs", "model-hardware-standard", "claude",
-  "3d-printing", "bambu-lab", "a1-mini",
+  "mcp", "mcp-server", "model-context-protocol", "mhs",
+  "model-hardware-standard", "claude",
+  "3d-printing", "3d-printer", "bambu-lab", "a1-mini", "slicer",
   "roborock", "saros", "robot-vacuum", "home-automation",
 ]
 classifiers = [
