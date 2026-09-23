@@ -305,6 +305,41 @@ async def cmd_doctor(app, args) -> int:
     return 0 if ok else 1
 
 
+async def cmd_setup(app, args) -> int:
+    """Is this machine ready to print, and what is missing if not?
+
+    `doctor` answers "can I reach it". This answers "is it configured", which is
+    the question that decides whether the first print works.
+    """
+    from .setup import build_report
+
+    config = app.settings.get(args.printer)
+    status = None
+    try:
+        device = await _printer(app, args)
+        status = await device.status()
+    except MHSError as exc:
+        print(f"could not read status: {exc.message}", file=sys.stderr)
+
+    report = build_report(config.device_id, config, status, app.settings.read_only)
+
+    print(f"{report.device_id}  model={report.model}  {'READY' if report.ready else 'NOT READY'}")
+    if report.observed.get("plate_type"):
+        print(f"  plate: {report.observed['plate_type']}")
+    for finding in report.findings:
+        print(f"  {finding.severity}: {finding.message}")
+        if finding.suggestion:
+            print(f"    -> {finding.suggestion}")
+
+    rec = report.recommended
+    print(f"\nrecommended starting point for a {report.model}:")
+    print(f"  plate {rec.plate_type}, {rec.material} at {rec.nozzle_c:g} C nozzle / {rec.bed_c:g} C bed")
+    print(f"  layer height {rec.layer_height_mm:g} mm")
+    for note in rec.notes:
+        print(f"  - {note}")
+    return 0 if report.ready else 1
+
+
 def _doctor_verdict(ok: bool, unreachable: bool = False) -> None:
     if ok:
         print("all good")
@@ -809,6 +844,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     add("scheduler", cmd_scheduler, "run the scheduler in the foreground")
     add("doctor", cmd_doctor, "check every transport and explain what is broken")
+    add("setup", cmd_setup, "is this machine configured to print, and what is missing")
     add("serve", cmd_serve, "run the MCP server over stdio", needs_app=False)
     return parser
 

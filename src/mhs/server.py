@@ -474,6 +474,32 @@ def create_server(settings: Settings | None = None, *, run_scheduler: bool = Tru
         except MHSError as exc:
             return _fail(exc)
 
+    @server.tool()
+    async def check_setup(printer: str | None = None) -> dict:
+        """Is this machine configured to print, and what is missing if not?
+
+        Run it before the first print on an unfamiliar machine. `check_connection`
+        asks whether the printer answers; this asks whether it is set up - which
+        plate is fitted, whether filament is loaded, whether anything is blocking
+        a job - and returns recommended starting settings for the model.
+        """
+        from .setup import build_report
+
+        try:
+            config = app.settings.get(printer)
+        except MHSError as exc:
+            return _fail(exc)
+
+        status = None
+        try:
+            device = await _printer(printer)
+            status = await device.status()
+        except MHSError as exc:
+            log.debug("setup check could not read status: %s", exc)
+
+        report = build_report(config.device_id, config, status, app.settings.read_only)
+        return _ok(**report.to_dict())
+
     # --------------------------------------------------------------- camera
     @server.tool()
     async def capture_snapshot(printer: str | None = None, save: bool = True, label: str = "frame") -> Image:
