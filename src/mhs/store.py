@@ -55,6 +55,7 @@ CREATE TABLE IF NOT EXISTS observations (
     kind        TEXT NOT NULL,
     layer       INTEGER,
     text        TEXT,
+    caption     TEXT,
     image_path  TEXT,
     created_at  REAL NOT NULL
 );
@@ -161,6 +162,14 @@ class Store:
                 continue
             if "printer_id" in columns and "device_id" not in columns:
                 self._db.execute(f"ALTER TABLE {table} RENAME COLUMN printer_id TO device_id")
+        # v0.2 added captions: what the model saw in a stage frame, kept apart
+        # from `text`, which says why the frame was taken.
+        try:
+            columns = [row[1] for row in self._db.execute("PRAGMA table_info(observations)")]
+        except sqlite3.DatabaseError:  # pragma: no cover - unreadable file
+            return
+        if columns and "caption" not in columns:
+            self._db.execute("ALTER TABLE observations ADD COLUMN caption TEXT")
 
     def close(self) -> None:
         with self._lock:
@@ -300,6 +309,24 @@ class Store:
         )
         return self.get_run(run_id)
 
+    def record_run_settings(self, run_id: int, extra: dict) -> dict | None:
+        """Merge more settings into a run after it started.
+
+        A print begins before everything about it is known - the slice estimate
+        is produced upstream of `start_run` and belongs on the same row, because
+        that is what the run report compares the actual duration against.
+        """
+        rows = self._query("SELECT settings_json FROM print_runs WHERE id = ?", (run_id,))
+        if not rows:
+            return None
+        settings = json.loads(rows[0]["settings_json"] or "{}")
+        settings.update(extra)
+        self._execute(
+            "UPDATE print_runs SET settings_json = ? WHERE id = ?",
+            (json.dumps(settings), run_id),
+        )
+        return self.get_run(run_id)
+
     def get_run(self, run_id: int) -> dict | None:
         rows = self._query("SELECT * FROM print_runs WHERE id = ?", (run_id,))
         if not rows:
@@ -350,6 +377,21 @@ class Store:
         params.append(limit)
         return [dict(r) for r in self._query(sql, tuple(params))]
 
+    def get_observation(self, observation_id: int) -> dict | None:
+        rows = self._query("SELECT * FROM observations WHERE id = ?", (observation_id,))
+        return dict(rows[0]) if rows else None
+
+    def caption_observation(self, observation_id: int, caption: str) -> dict | None:
+        """Record what was actually seen in an observation's frame.
+
+        Captioning is the model's job: the monitor takes the photograph, this
+        stores the reading of it so the run report can be written later from
+        text alone, long after the frames have scrolled out of context.
+        """
+        self._execute(
+            "UPDATE observations SET caption = ? WHERE id = ?", (caption, observation_id)
+        )
+        return self.get_observation(observation_id)
 
     # -- camera scale calibration -----------------------------------------
     def save_calibration(self, device_id: str, payload: dict) -> None:

@@ -101,6 +101,12 @@ class Settings:
     default_device: str | None = None
     read_only: bool = False
     allow_raw_gcode: bool = False
+    #: Slicer binary to use; None searches the PATH for a known one.
+    slicer_binary: str | None = None
+    #: Profile files handed to the slicer before any per-slice override.
+    slicer_profiles: tuple[str, ...] = ()
+    #: How often the print-stage watcher polls. A print is slow; so is this.
+    monitor_poll_seconds: float = 20.0
     state_dir: Path = field(default_factory=lambda: Path.home() / ".local" / "share" / "mhs")
 
     @property
@@ -161,6 +167,15 @@ def load_settings(path: str | Path | None = None, env: dict | None = None) -> Se
             settings.allow_raw_gcode = _as_bool(server.get("allow_raw_gcode"), False)
             if server.get("state_dir"):
                 settings.state_dir = Path(server["state_dir"]).expanduser()
+
+            slicer = raw.get("slicer") or {}
+            settings.slicer_binary = slicer.get("binary")
+            profiles = slicer.get("profiles") or []
+            settings.slicer_profiles = tuple(str(p) for p in profiles)
+
+            monitor = raw.get("monitor") or {}
+            if monitor.get("poll_seconds"):
+                settings.monitor_poll_seconds = float(monitor["poll_seconds"])
             break
 
     # Environment: a single printer described inline, handy for `docker run -e ...`
@@ -196,6 +211,14 @@ def load_settings(path: str | Path | None = None, env: dict | None = None) -> Se
         settings.allow_raw_gcode = _as_bool(env.get("MHS_ALLOW_RAW_GCODE"))
     if env.get("MHS_STATE_DIR"):
         settings.state_dir = Path(env["MHS_STATE_DIR"]).expanduser()
+    if env.get("MHS_SLICER"):
+        settings.slicer_binary = env["MHS_SLICER"]
+    if env.get("MHS_MONITOR_POLL_SECONDS"):
+        settings.monitor_poll_seconds = float(env["MHS_MONITOR_POLL_SECONDS"])
+    if env.get("MHS_SLICER_PROFILES"):
+        settings.slicer_profiles = tuple(
+            p for p in env["MHS_SLICER_PROFILES"].split(os.pathsep) if p
+        )
 
     if settings.default_device and settings.default_device not in settings.devices:
         raise ConfigError(f"default_device '{settings.default_device}' is not defined")
