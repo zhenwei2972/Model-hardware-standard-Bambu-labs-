@@ -5,9 +5,10 @@
 Connect Claude (or any MCP client) to real hardware:
 
 * **Bambu Lab A1 mini, A1, P1P, P1S, X1** over your local network, no cloud
-  account — start and schedule prints, monitor them, read the chamber camera,
-  measure printed parts against a reference object, and check whether a model
-  is printable before slicing it.
+  account — slice a model for speed or for quality, start and schedule prints,
+  watch each stage through the chamber camera and get a report on how the print
+  went, measure printed parts against a reference object, and find out what the
+  machine cannot reproduce before wasting filament on it.
 * **Roborock Saros 10, 10R, Z70** — send the robot to a point you picked off its
   map, clean rooms by name, save named locations, and drive the dock.
 
@@ -25,7 +26,8 @@ Saros Z70 and the wider V1 vacuum family (Roborock cloud).
                      ┌─ standard/  read/write channels + limits + device descriptor
 Claude ─MCP(stdio)─▶ │             (the MHS surface — identical for every device)
                      ├─ design/    mesh · render · printability · camera & map measurement
-    mhs server ──────┤
+    mhs server ──────┼─ slicing/   drives OrcaSlicer / Bambu Studio / PrusaSlicer, by intent
+                     ├─ monitor    print stages · captioned frames · run report
                      ├─ scheduler + print journal + named locations (SQLite)
                      │
                      └─ Device ─┬─ Printer ─┬─ bambu     MQTT 8883 · FTPS 990 · cam 6000
