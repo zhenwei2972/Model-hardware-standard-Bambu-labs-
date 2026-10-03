@@ -525,7 +525,10 @@ async def cmd_slice(app, args) -> int:
         target = Path(args.output) if (args.output and len(names) == 1) else app.slice_path(
             f"{Path(args.path).stem}-{name}", suffix
         )
-        result = slicer.slice(args.path, target, settings)
+        config = app.settings.get(args.printer) if app.settings.devices else None
+        result = slicer.slice(args.path, target, settings,
+                              printer_model=config.model if config else None,
+                              plate_type=config.plate_type if config else "")
         rows.append((name, meta, result))
         print(f"{name:9} {result.summary()}")
         print(f"          -> {result.output_path}")

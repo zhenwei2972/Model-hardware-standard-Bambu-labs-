@@ -125,6 +125,14 @@ def create_server(settings: Settings | None = None, *, run_scheduler: bool = Tru
             )
         return device
 
+    def _slice_hints(printer: str | None) -> dict:
+        """The printer model and fitted plate, which Bambu Studio slices against."""
+        try:
+            config = app.settings.get(printer)
+        except MHSError:
+            return {}
+        return {"printer_model": config.model, "plate_type": config.plate_type}
+
     def _preflight_findings(local_path: str, device_id: str, plate: int) -> list[dict]:
         """Read a sliced file before sending it, and say what looks wrong.
 
@@ -1229,7 +1237,8 @@ def create_server(settings: Settings | None = None, *, run_scheduler: bool = Tru
                     ".gcode" if slicer.flavour.value == "prusaslicer" else ".gcode.3mf",
                 )
             )
-            result = await asyncio.to_thread(slicer.slice, file, target, settings)
+            result = await asyncio.to_thread(slicer.slice, file, target, settings,
+                                             **_slice_hints(printer))
         except MHSError as exc:
             return _fail(exc)
         return _ok(
@@ -1268,7 +1277,8 @@ def create_server(settings: Settings | None = None, *, run_scheduler: bool = Tru
                     f"{file.stem}-{name}",
                     ".gcode" if slicer.flavour.value == "prusaslicer" else ".gcode.3mf",
                 )
-                result = await asyncio.to_thread(slicer.slice, file, target, settings)
+                result = await asyncio.to_thread(slicer.slice, file, target, settings,
+                                                 **_slice_hints(printer))
             except MHSError as exc:
                 failures.append({"intent": name, "error": exc.message})
                 continue

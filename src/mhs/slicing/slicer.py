@@ -49,6 +49,13 @@ BINARIES: dict[SlicerFlavour, tuple[str, ...]] = {
     SlicerFlavour.PRUSA: ("prusa-slicer", "prusaslicer", "PrusaSlicer"),
 }
 
+#: Where a stock macOS install puts each slicer's CLI, same preference order.
+APP_BUNDLES: dict[SlicerFlavour, tuple[str, ...]] = {
+    SlicerFlavour.ORCA: ("/Applications/OrcaSlicer.app/Contents/MacOS/OrcaSlicer",),
+    SlicerFlavour.BAMBU: ("/Applications/BambuStudio.app/Contents/MacOS/BambuStudio",),
+    SlicerFlavour.PRUSA: ("/Applications/PrusaSlicer.app/Contents/MacOS/PrusaSlicer",),
+}
+
 #: Neutral setting -> the flag each flavour calls it.
 #:
 #: The PrusaSlicer column is verified empirically against 2.7.2. The Orca and
@@ -155,6 +162,13 @@ def find_slicer(explicit: str | None = None, env: dict | None = None) -> tuple[P
             found = shutil.which(name)
             if found:
                 return Path(found), flavour
+    # On macOS the slicers ship as .app bundles that are never on the PATH, so
+    # a stock install was invisible here; look inside the bundles too.
+    for flavour, bundles in APP_BUNDLES.items():
+        for bundle in bundles:
+            path = Path(bundle)
+            if path.is_file():
+                return path, flavour
     raise ConfigError(
         "no slicer found on the PATH",
         hint="Install OrcaSlicer, Bambu Studio or PrusaSlicer, or set MHS_SLICER to the "
@@ -238,8 +252,13 @@ class Slicer:
         return directory / f"{stem}{suffix}"
 
     # -- run ----------------------------------------------------------------
-    def slice(self, model: str | Path, output: str | Path, settings: SliceSettings) -> SliceResult:
-        """Slice ``model`` to ``output``. Raises on anything the slicer refuses."""
+    def slice(self, model: str | Path, output: str | Path, settings: SliceSettings, *,
+              printer_model: str | None = None, plate_type: str = "") -> SliceResult:
+        """Slice ``model`` to ``output``. Raises on anything the slicer refuses.
+
+        ``printer_model`` and ``plate_type`` matter for Bambu Studio, which
+        slices against the machine's own system profiles (see ``bambu.py``).
+        """
         source = Path(model).expanduser()
         if not source.is_file():
             raise CommandRejected(f"{source} does not exist")
@@ -247,6 +266,20 @@ class Slicer:
         target.parent.mkdir(parents=True, exist_ok=True)
         if target.exists():
             target.unlink()  # so "file exists" is a reliable success signal
+
+        if self.flavour is SlicerFlavour.BAMBU:
+            # Bambu Studio's CLI rejects --setting overrides; settings go in
+            # through flattened profile files instead, and the output is checked
+            # before it is handed back. Exported profiles are not used here.
+            from .bambu import slice_bambu
+
+            argv = slice_bambu(self.binary, source, target, settings,
+                               printer_model=printer_model, plate=plate_type,
+                               timeout_s=self.timeout_s)
+            result = SliceResult(output_path=target, flavour=self.flavour,
+                                 requested=settings.to_dict(), command=argv)
+            _read_back(result)
+            return result
 
         argv = self.build_args(source, target, settings)
         log.info("slicing: %s", " ".join(argv))
@@ -327,6 +360,11 @@ def _read_back(result: SliceResult) -> None:
             continue
         raw = match.group(1)
         setattr(result, name, raw if name == "estimated_time" else float(raw))
+    if result.estimated_time is None:
+        # Bambu Studio words it "; model printing time: 16m 12s; total estimated time: 22m 17s"
+        match = re.search(r"total estimated time:\s*([^;\n]+)", text)
+        if match:
+            result.estimated_time = match.group(1).strip()
     result.estimated_time_minutes = _minutes(result.estimated_time)
 
     for key in _APPLIED_KEYS:
