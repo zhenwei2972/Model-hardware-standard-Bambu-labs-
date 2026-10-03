@@ -211,6 +211,34 @@ mhs report 7                       # the write-up
 
 Full guide: [docs/MONITORING.md](docs/MONITORING.md).
 
+## A real run, start to finish
+
+> *"I want to print a figurine display rack, much like a staircase... design it
+> to make the most of one IKEA Detolf shelf... can we make it stackable?"*
+
+In one conversation, Claude:
+
+1. designed it as meshes with stand-in figures and showed it in a 3D viewer;
+2. looked up the shelf (about 390 × 330 mm, 381 mm high) and sized it to the
+   A1 mini's 180 mm plate;
+3. compared settings with the slicer's own numbers (7 h 18 → 6 h 08 per
+   riser) and redesigned it as a stackable 176 × 100 × 50 mm block that prints
+   in 2 h 56;
+4. checked the stacking fit on the meshes (0 mm³ overlap; a 0.31 mm slide
+   collides);
+5. asked before printing, then printed it, watched it, captioned every stage
+   frame, and filed the run report;
+6. wrote down every preflight check before the next block, and that record
+   caught the slicer placing the part over the printer's purge line.
+
+<p align="center">
+  <img src="docs/images/detolf/detolf_cabinet.jpg" alt="The stack in a Detolf cabinet" width="32%">
+  <img src="docs/images/detolf/detolf_fit.jpg" alt="The fit, measured" width="64%">
+</p>
+
+Full write-up, with the numbers and what went wrong:
+[docs/CASE_STUDY_DETOLF.md](docs/CASE_STUDY_DETOLF.md).
+
 ## Install
 
 Python 3.10+.
