@@ -69,6 +69,9 @@ MILESTONES: dict[str, Milestone] = {
 #: Progress-based milestones, as a fraction of total layers.
 _PROGRESS_POINTS = (("quarter", 0.25), ("half", 0.5), ("three_quarters", 0.75))
 
+#: Milestones that end the job being watched. The watcher stops at the first.
+TERMINAL_MILESTONES = ("finished", "failed")
+
 
 def detect_milestones(
     previous: PrinterStatus | None, current: PrinterStatus
@@ -114,6 +117,33 @@ def detect_milestones(
     return crossed
 
 
+def job_changed(
+    previous: PrinterStatus | None, current: PrinterStatus, *, following: bool
+) -> str | None:
+    """Why ``current`` belongs to a different job than the one being followed.
+
+    ``following`` says whether the watcher has already seen its job start. A
+    job that starts on its own after the watched one must not be filed under
+    the watched run: on 5 Oct a job nobody sent started 1 h 50 min after run 13
+    finished, and was recorded as run 13 failing.
+    """
+    if previous is None or not following:
+        return None
+    if current.state.is_active and not previous.state.is_active:
+        return f"another job started ({current.job_name or 'unnamed'})"
+    # While preparing, the printer can still report the last job's name and
+    # layer, so only compare once this one is actually printing.
+    if previous.state not in (PrintState.RUNNING, PrintState.PAUSED) or not current.state.is_active:
+        return None
+    if previous.job_name and current.job_name and previous.job_name != current.job_name:
+        return f"the job changed from {previous.job_name} to {current.job_name}"
+    # Layers only count up within a job; going back means it started again.
+    before, after = previous.current_layer, current.current_layer
+    if before is not None and after is not None and after < before:
+        return f"the layer count went back from {before} to {after}, so a job restarted"
+    return None
+
+
 @dataclass
 class PrintMonitor:
     """Polls one printer and records a frame at each milestone."""
@@ -131,6 +161,10 @@ class PrintMonitor:
     _stopping: asyncio.Event = field(default_factory=asyncio.Event, init=False, repr=False)
     _previous: PrinterStatus | None = field(default=None, init=False, repr=False)
     _seen: set[str] = field(default_factory=set, init=False, repr=False)
+    #: Whether the job being watched has been seen running.
+    _following: bool = field(default=False, init=False, repr=False)
+    #: Why the watcher stopped on its own: the job ended, or another replaced it.
+    ended: str | None = field(default=None, init=False)
 
     @property
     def running(self) -> bool:
@@ -156,7 +190,7 @@ class PrintMonitor:
             self._task = None
 
     async def _loop(self) -> None:
-        while not self._stopping.is_set():
+        while not self._stopping.is_set() and self.ended is None:
             try:
                 await self.tick()
             except Exception:  # pragma: no cover - a watcher must outlive a bad poll
@@ -165,10 +199,27 @@ class PrintMonitor:
                 await asyncio.wait_for(self._stopping.wait(), timeout=self.poll_interval)
 
     async def tick(self) -> list[dict]:
-        """Poll once, record anything crossed. Returns what it recorded."""
+        """Poll once, record anything crossed. Returns what it recorded.
+
+        Once the watched job has finished or failed, or another job has taken
+        its place, nothing more is recorded and the loop ends.
+        """
+        if self.ended is not None:
+            return []
         status = await self.status_fn()
+        if status.state in (PrintState.OFFLINE, PrintState.UNKNOWN):
+            # No news. Compare the next real report against the last one, so a
+            # Wi-Fi drop mid-print does not read as the job starting again.
+            return []
+        changed = job_changed(self._previous, status, following=self._following)
+        if changed:
+            self.ended = changed
+            log.info("%s: stopped watching run %s: %s", self.device_id, self.run_id, changed)
+            return []
         crossed = detect_milestones(self._previous, status)
         self._previous = status
+        if status.state.is_active:
+            self._following = True
 
         recorded = []
         for name, detail in crossed:
@@ -181,6 +232,11 @@ class PrintMonitor:
                 continue
             self._seen.add(key)
             recorded.append(await self._record(name, detail, status))
+
+        terminal = next((name for name, _ in crossed if name in TERMINAL_MILESTONES), None)
+        if terminal:
+            self.ended = f"the job {terminal}"
+            log.info("%s: run %s %s; watcher done", self.device_id, self.run_id, terminal)
         return recorded
 
     async def _record(self, name: str, detail: str, status: PrinterStatus) -> dict:

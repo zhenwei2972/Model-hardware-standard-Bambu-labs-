@@ -768,7 +768,9 @@ def create_server(settings: Settings | None = None, *, run_scheduler: bool = Tru
         journal. Later, `review_print_stages` hands you those frames to caption
         and `print_report` assembles the whole run.
 
-        Stops on its own when the server shuts down; `stop_watching_print` ends
+        Stops on its own at the first `finished` or `failed` stage, or as soon
+        as a different job starts, so a later job is never filed under this
+        run. Also stops when the server shuts down; `stop_watching_print` ends
         it sooner. One watcher per printer.
         """
         unknown = sorted(set(stages or ()) - set(MILESTONES))
@@ -822,6 +824,7 @@ def create_server(settings: Settings | None = None, *, run_scheduler: bool = Tru
                 "printer": device_id,
                 "run_id": monitor.run_id,
                 "running": monitor.running,
+                "ended": monitor.ended,
                 "poll_seconds": monitor.poll_interval,
                 "captured": monitor.captured,
             }
