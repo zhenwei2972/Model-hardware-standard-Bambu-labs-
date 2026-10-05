@@ -161,9 +161,10 @@ log_print_result -> the journal, so the next iteration starts from evidence
 
 Worked example: [docs/DESIGN_LOOP.md](docs/DESIGN_LOOP.md).
 
-Two honest limits. Feature size is estimated from mesh edge lengths and the
-volume-to-area ratio, not a medial-axis analysis: it reliably catches "far too
-fine" and "wall too thin", not every thin region in a complex part. And the
+Two honest limits. Feature size is the part's local thickness, measured by
+casting rays inward from a few thousand points on its surface, so triangle size
+does not affect it; but a feature under about 0.1% of the surface can be
+missed, and narrow gaps and slots are not measured. And the
 chamber camera is off-axis with lens distortion, so measurements are good to a
 few percent with a reference object in the same plane — not caliper-grade. Both
 caveats are returned with the results rather than buried here.

@@ -19,8 +19,8 @@ analyze_model(path="~/models/badge.stl")
   "model": {"dimensions_mm": {"x": 60.0, "y": 60.0, "z": 4.2}, "volume_mm3": 8021.5,
             "triangles": 48216, "watertight": true},
   "verdict": "At a 0.4 mm nozzle and 0.2 mm layers, A1 mini resolves about 0.4 mm in XY
-              and 0.2 mm in Z. About 7% of its detail is below that threshold and will
-              soften. 0 blocker(s), 1 warning(s).",
+              and 0.2 mm in Z. About 7% of its surface is on features below that size,
+              which will soften. 0 blocker(s), 1 warning(s).",
   "printability": {"findings": [...], "metrics": {"detail_below_nozzle_percent": 7.1, ...}}
 }
 ```
@@ -159,7 +159,7 @@ your captions and the actual time against the slicer's estimate. See
 | --- | --- | --- |
 | Mesh dimensions, volume, triangle count | exact | read straight off the geometry |
 | Overhang area, bed contact, layer count | reliable | direct consequences of the geometry and layer height |
-| "% of detail below the nozzle" | indicative | edge length is a proxy for feature size, not a medial-axis analysis |
+| "% of detail below the nozzle" | indicative | share of the surface whose local thickness (inward ray casts, ~4000 samples) is under one extrusion; narrow gaps are not measured |
 | Characteristic wall thickness | rough | a global volume-to-area ratio; it catches thin *parts*, not every thin *region* |
 | Camera measurements | a few percent | off-axis camera, lens distortion, reference must be in the same plane |
 | Mass and filament estimates | rough | the slicer's numbers are authoritative |

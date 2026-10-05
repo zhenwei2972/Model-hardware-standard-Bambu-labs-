@@ -6,11 +6,15 @@ survive?* FDM resolution is anisotropic and bounded by the extrusion width in
 XY and the layer height in Z, so a model can look perfect on screen and come
 out as a smooth blob.
 
-Honest about its limits: feature size is estimated from mesh edge lengths and
-the volume-to-area ratio, not from a medial-axis or voxel analysis. It reliably
-catches "this detail is far too fine" and "this wall is too thin"; it will not
-find every thin region in a complex part. The slicer's preview remains the
-authority, and the camera closes the loop.
+Feature size is measured, not inferred from the mesh: rays cast inward from
+points sampled over the surface give the local thickness of the part there
+(see :meth:`Mesh.local_thickness`). Triangle size says nothing about it - a
+smooth spline corner can be thousands of 0.01 mm slivers on a 2 mm wall.
+
+Honest about its limits: one ray per sample point, a few thousand points, so a
+feature smaller than about 0.1% of the surface can be missed, and narrow gaps
+and slots (negative features) are not measured. The slicer's preview remains
+the authority, and the camera closes the loop.
 """
 
 from __future__ import annotations
@@ -26,6 +30,21 @@ from .render import overhanging_faces
 
 #: 1.75 mm filament cross-section, for length estimates.
 _FILAMENT_AREA_MM2 = math.pi * (1.75 / 2) ** 2
+
+#: Share of the surface on sub-extrusion features that earns a warning / a note.
+_FINE_WARNING_PERCENT = 10.0
+_FINE_NOTE_PERCENT = 2.0
+
+
+def _fine_percent(thickness: np.ndarray, weight: np.ndarray, limit_mm: float) -> float:
+    """Percent of the surface standing on features thinner than ``limit_mm``."""
+    return float(weight[thickness < limit_mm].sum() * 100)
+
+
+def _weighted_percentile(values: np.ndarray, weight: np.ndarray, q: float) -> float:
+    order = np.argsort(values)
+    cumulative = np.cumsum(weight[order])
+    return float(values[order][min(np.searchsorted(cumulative, q / 100), len(values) - 1)])
 
 SEVERITIES = ("blocker", "warning", "note")
 
@@ -81,11 +100,12 @@ class PrintabilityReport:
             f"{self.printer} resolves about {self.limits.min_xy_feature_mm:g} mm in XY and "
             f"{self.limits.min_vertical_feature_mm:g} mm in Z."
         )
-        if lost >= 25:
-            body = (f" {lost:.0f}% of this model's detail is finer than that and will merge or "
-                    "disappear - scale up or simplify.")
-        elif lost >= 5:
-            body = f" About {lost:.0f}% of its detail is below that threshold and will soften."
+        if lost >= _FINE_WARNING_PERCENT:
+            body = (f" {lost:.0f}% of this model's surface is on features thinner than that, which "
+                    "will merge or disappear - scale up or simplify.")
+        elif lost >= _FINE_NOTE_PERCENT:
+            body = (f" About {lost:.0f}% of its surface is on features below that size, which "
+                    "will soften.")
         else:
             body = " Essentially all of its modelled detail is reproducible at this size."
         counts = {s: len([f for f in self.findings if f.severity == s]) for s in SEVERITIES}
@@ -132,32 +152,42 @@ def analyze(
             f"Scale to at most {float((volume / dims).min()):.2f}x, or split it into parts.",
         ))
 
-    # -- detail vs extrusion width ---------------------------------------
+    # -- feature size vs extrusion width ---------------------------------
+    # Measured as local thickness, not triangle size (see the module docstring).
+    reach = limits.min_wall_mm * 2
+    thickness, weight = mesh.local_thickness(max_mm=reach)
+    below = _fine_percent(thickness, weight, limits.min_xy_feature_mm)
+    metrics["detail_below_nozzle_percent"] = round(below, 1)
+    metrics["feature_thickness_mm"] = {
+        "p05": round(min(_weighted_percentile(thickness, weight, 5), reach), 3),
+        "median": round(min(_weighted_percentile(thickness, weight, 50), reach), 3),
+        "measured_up_to_mm": reach,
+        "samples": len(thickness),
+    }
     edges = mesh.edge_lengths
     edges = edges[edges > 1e-9]
     if len(edges):
-        below = float((edges < limits.min_xy_feature_mm).mean() * 100)
-        metrics["detail_below_nozzle_percent"] = round(below, 1)
+        # Mesh resolution only, for reference; no finding rests on it.
         metrics["edge_length_mm"] = {
-            "p01": round(float(np.percentile(edges, 1)), 4),
             "p05": round(float(np.percentile(edges, 5)), 4),
             "median": round(float(np.percentile(edges, 50)), 4),
         }
-        if below >= 25:
-            needed = limits.min_xy_feature_mm / max(float(np.percentile(edges, 5)), 1e-6)
-            findings.append(Finding(
-                "warning", "detail_too_fine",
-                f"{below:.0f}% of the mesh's edges are shorter than the {limits.nozzle_mm:g} mm "
-                "extrusion width, so that detail cannot be drawn.",
-                f"Scale up by about {needed:.1f}x, fit a smaller nozzle, or remove the fine "
-                "detail so it does not mislead you.",
-            ))
-        elif below >= 5:
-            findings.append(Finding(
-                "note", "detail_partially_fine",
-                f"{below:.0f}% of the mesh's edges are below the extrusion width; the finest "
-                "surface relief will soften.",
-            ))
+    if below >= _FINE_WARNING_PERCENT:
+        thinnest = max(_weighted_percentile(thickness, weight, 5), 1e-3)
+        needed = limits.min_xy_feature_mm / thinnest
+        findings.append(Finding(
+            "warning", "detail_too_fine",
+            f"{below:.0f}% of the surface is on features thinner than the "
+            f"{limits.nozzle_mm:g} mm extrusion width, so they cannot be drawn.",
+            f"Scale up by about {needed:.1f}x, fit a smaller nozzle, or thicken those "
+            "features so the print matches the model.",
+        ))
+    elif below >= _FINE_NOTE_PERCENT:
+        findings.append(Finding(
+            "note", "detail_partially_fine",
+            f"{below:.0f}% of the surface is on features thinner than the extrusion width; "
+            "they will soften or drop out.",
+        ))
 
     # -- characteristic thickness ----------------------------------------
     area = mesh.surface_area_mm2
@@ -299,10 +329,13 @@ def scale_advice(mesh: Mesh, spec: PrinterSpec, target_mm: float, axis: str = "m
     """
     limits = limits_for(spec, nozzle_mm, layer_height_mm)
     scaled, factor = mesh.scale_to_dimension(target_mm, axis)
-    edges = mesh.edge_lengths
-    edges = edges[edges > 1e-9]
-    before = float((edges < limits.min_xy_feature_mm).mean() * 100) if len(edges) else 0.0
-    after = float((edges * factor < limits.min_xy_feature_mm).mean() * 100) if len(edges) else 0.0
+    # Thickness scales with the model, so one measurement answers both sizes:
+    # a feature survives the scale if thickness * factor clears the nozzle.
+    limit = limits.min_xy_feature_mm
+    reach = min(limit / min(factor, 1.0), float(np.linalg.norm(mesh.dimensions))) * 1.05
+    thickness, weight = mesh.local_thickness(max_mm=reach)
+    before = _fine_percent(thickness, weight, limit)
+    after = _fine_percent(thickness * factor, weight, limit)
     return {
         "factor": round(factor, 4),
         "target_mm": target_mm,
