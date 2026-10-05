@@ -202,6 +202,64 @@ def test_gcode_is_read_from_inside_a_3mf(tmp_path):
     assert "layer_height = 0.16" in _read_gcode_text(archive)
 
 
+# Lines 1-10 of Metadata/plate_1.gcode from the chamfered bumper, sliced by
+# Bambu Studio for the A1 mini on 4 Oct. It has no footer summary.
+BAMBU_HEADER = """; HEADER_BLOCK_START
+; BambuStudio 02.03.00.70
+; model printing time: 19m 49s; total estimated time: 25m 53s
+; total layer number: 50
+; total filament length [mm] : 3490.04
+; total filament volume [cm^3] : 8394.52
+; total filament weight [g] : 10.41
+; filament_density: 1.24
+; filament_diameter: 1.75
+; max_z_height: 10.00
+; filament: 1
+; HEADER_BLOCK_END
+"""
+
+
+def _bambu_result(tmp_path, header: str):
+    from mhs.slicing.slicer import SliceResult, _read_back
+
+    archive = tmp_path / "case.gcode.3mf"
+    with zipfile.ZipFile(archive, "w") as zf:
+        zf.writestr("Metadata/plate_1.gcode", header + "G28\nG1 X10 Y10\n")
+    result = SliceResult(output_path=archive, flavour=SlicerFlavour.BAMBU, requested={})
+    _read_back(result)
+    return result
+
+
+def test_bambu_studio_filament_is_read_from_the_header(tmp_path):
+    """slice_model returned filament_g: null although the header says 10.41 g."""
+    result = _bambu_result(tmp_path, BAMBU_HEADER)
+    assert result.filament_g == 10.41
+    assert result.filament_mm == 3490.04
+    # The header says [cm^3] but means mm3: 8394.52 mm3 is 8.39 cm3.
+    assert result.filament_cm3 == 8.39
+    assert result.estimated_time_minutes == 26
+    assert "10.4 g" in result.summary()
+
+
+def test_a_correctly_labelled_bambu_volume_is_not_divided_again(tmp_path):
+    result = _bambu_result(tmp_path, BAMBU_HEADER.replace("8394.52", "8.39"))
+    assert result.filament_cm3 == 8.39
+
+
+def test_without_length_the_volume_comes_from_weight_and_density(tmp_path):
+    header = "\n".join(line for line in BAMBU_HEADER.splitlines()
+                       if "length" not in line and "volume" not in line)
+    result = _bambu_result(tmp_path, header + "\n")
+    assert result.filament_cm3 == 8.4  # 10.41 g / 1.24 g/cm3
+    assert result.filament_mm is None
+
+
+def test_a_footer_summary_still_wins_over_the_header(tmp_path):
+    footer = "; filament used [mm] = 100.0\n; filament used [cm3] = 0.24\n; total filament used [g] = 0.30\n"
+    result = _bambu_result(tmp_path, BAMBU_HEADER + footer)
+    assert (result.filament_mm, result.filament_cm3, result.filament_g) == (100.0, 0.24, 0.30)
+
+
 # -- the real thing ---------------------------------------------------------
 @pytest.fixture
 def cube(tmp_path):

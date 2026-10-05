@@ -18,6 +18,7 @@ slicer actually applied - not what we asked for - is what gets reported.
 from __future__ import annotations
 
 import logging
+import math
 import os
 import re
 import shutil
@@ -333,6 +334,15 @@ _SUMMARY_PATTERNS = {
     "filament_g": re.compile(r"^;\s*total filament used \[g\]\s*=\s*([\d.]+)", re.M),
 }
 
+#: Bambu Studio's header block words the same figures differently, with a colon.
+_BAMBU_HEADER = {
+    "length_mm": re.compile(r"^;\s*total filament length \[mm\]\s*:\s*([\d.]+)", re.M),
+    "volume": re.compile(r"^;\s*total filament volume \[cm\^3\]\s*:\s*([\d.]+)", re.M),
+    "weight_g": re.compile(r"^;\s*total filament weight \[g\]\s*:\s*([\d.]+)", re.M),
+    "density": re.compile(r"^;\s*filament_density:\s*([\d.]+)", re.M),
+    "diameter_mm": re.compile(r"^;\s*filament_diameter:\s*([\d.]+)", re.M),
+}
+
 #: Settings worth echoing back, under the slicer's own names.
 _APPLIED_KEYS = (
     "layer_height", "first_layer_height", "initial_layer_print_height", "fill_density",
@@ -360,6 +370,7 @@ def _read_back(result: SliceResult) -> None:
             continue
         raw = match.group(1)
         setattr(result, name, raw if name == "estimated_time" else float(raw))
+    _read_bambu_header(result, text)
     if result.estimated_time is None:
         # Bambu Studio words it "; model printing time: 16m 12s; total estimated time: 22m 17s"
         match = re.search(r"total estimated time:\s*([^;\n]+)", text)
@@ -371,6 +382,45 @@ def _read_back(result: SliceResult) -> None:
         match = re.search(rf"^;\s*{re.escape(key)}\s*=\s*(.+?)\s*$", text, re.M)
         if match:
             result.applied[key] = match.group(1)
+
+
+def _read_bambu_header(result: SliceResult, text: str) -> None:
+    """Fill filament figures from Bambu Studio's header, where the footer had none.
+
+    Bambu Studio labels its volume line ``[cm^3]`` but writes mm3: 3490 mm of
+    1.75 mm filament comes out as "8394.52", which is 8.39 cm3 (and 10.41 g at
+    1.24 g/cm3, matching its own weight line). The header figure is kept, read
+    in whichever unit agrees with length x filament cross-section (or weight /
+    density), so a later Bambu Studio that fixes the label still reads right.
+    """
+    found = {}
+    for name, pattern in _BAMBU_HEADER.items():
+        match = pattern.search(text)
+        if match:
+            found[name] = float(match.group(1))
+    if not found:
+        return
+
+    if result.filament_mm is None and "length_mm" in found:
+        result.filament_mm = found["length_mm"]
+    if result.filament_g is None and "weight_g" in found:
+        result.filament_g = found["weight_g"]
+    if result.filament_cm3 is not None:
+        return
+
+    length, diameter = found.get("length_mm"), found.get("diameter_mm")
+    weight, density = found.get("weight_g"), found.get("density")
+    if length and diameter:
+        expected = length * math.pi * (diameter / 2) ** 2 / 1000
+    elif weight and density:
+        expected = weight / density
+    else:
+        return  # a lone volume figure could be either unit; better none than 1000x off
+    raw = found.get("volume")
+    if raw is not None:
+        # Keep whichever reading of the header figure agrees with the geometry.
+        expected = min((raw, raw / 1000), key=lambda value: abs(value - expected))
+    result.filament_cm3 = round(expected, 2)
 
 
 def _read_gcode_text(path: Path, tail_bytes: int = 400_000) -> str:

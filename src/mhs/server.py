@@ -1332,6 +1332,7 @@ def create_server(settings: Settings | None = None, *, run_scheduler: bool = Tru
                 "summary": meta.summary,
                 "trade": meta.trade,
                 "minutes": result.estimated_time_minutes,
+                "filament_g": result.filament_g,
                 "filament_cm3": result.filament_cm3,
                 "layer_height_mm": settings.layer_height_mm,
                 "infill_percent": settings.infill_percent,
