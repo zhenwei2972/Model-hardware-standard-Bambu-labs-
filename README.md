@@ -89,7 +89,7 @@ device kind.
 | --- | --- |
 | Monitoring | `get_status` (state, layer, progress, temps, filament, decoded HMS alerts) |
 | Files | `list_files`, `upload_file` |
-| Printing | `start_print`, `upload_and_print`, `pause_print`, `resume_print`, `stop_print` |
+| Printing | `start_print`, `upload_and_print`, `pause_print`, `resume_print`, `stop_print`, `clear_print_error` |
 | Controls | `set_temperature`, `set_light`, `set_print_speed`, `send_gcode` (safe-listed) |
 | Camera | `capture_snapshot` (returns the JPEG to the model), `capture_frames`, `read_capture` |
 | Scheduling | `schedule_print`, `list_scheduled_jobs`, `cancel_scheduled_job` |
@@ -384,9 +384,10 @@ Start with `MHS_READ_ONLY=1` so the first session can only look, then drop it.
 
 Hardware that heats to 220 °C deserves more care than a web API:
 
-* **Confirmation gate.** `start_print`, `upload_and_print`, `stop_print` and
-  `send_gcode` refuse to act unless called with `confirm=true`; the first call
-  returns what *would* happen. The model has to decide twice.
+* **Confirmation gate.** `start_print`, `upload_and_print`, `stop_print`,
+  `clear_print_error` and `send_gcode` refuse to act unless called with
+  `confirm=true`; the first call returns what *would* happen. The model has to
+  decide twice.
 * **Read-only mode.** `MHS_READ_ONLY=1` leaves monitoring and camera tools
   working and rejects every write.
 * **Gcode allow-list.** Raw gcode is limited to temperature/fan/homing/report

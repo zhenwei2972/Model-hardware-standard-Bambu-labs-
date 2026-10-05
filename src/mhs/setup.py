@@ -166,8 +166,8 @@ def check_status(status, config) -> list[Finding]:
                 code="active_alert",
                 message=f"{alert.code} is active; prints are refused while it is",
                 suggestion=(
-                    "Clear it on the screen. A print error that survives being dismissed "
-                    "needs clean_print_error or a power cycle."
+                    "Clear it on the screen, or with clear_print_error(confirm=True). An "
+                    "HMS alert that survives both needs a power cycle."
                 ),
             )
         )

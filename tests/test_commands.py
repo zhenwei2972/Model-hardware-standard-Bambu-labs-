@@ -103,3 +103,25 @@ def test_pause_resume_stop_shape():
         body = builder(4)["print"]
         assert body["param"] == ""
         assert body["sequence_id"] == "4"
+
+
+async def test_the_driver_clears_a_print_error_with_clean_print_error(monkeypatch):
+    """No tool used to send this, although check_setup told people to."""
+    from mhs.config import PrinterConfig
+    from mhs.drivers import build
+
+    printer = build(PrinterConfig(device_id="a1mini", driver="bambu", model="A1 mini",
+                                  host="192.0.2.10", serial="01P00A000000000",
+                                  access_code="12345678"))
+    sent: list[dict] = []
+
+    async def connected():
+        return None
+
+    monkeypatch.setattr(printer, "_ensure_connected", connected)
+    monkeypatch.setattr(
+        printer._mqtt, "publish_and_wait",
+        lambda payload, timeout=None: sent.append(payload) or {"acknowledged": True},
+    )
+    assert (await printer.clear_print_error())["acknowledged"] is True
+    assert sent[0]["print"]["command"] == "clean_print_error"

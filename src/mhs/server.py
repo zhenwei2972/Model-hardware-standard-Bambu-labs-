@@ -431,6 +431,48 @@ def create_server(settings: Settings | None = None, *, run_scheduler: bool = Tru
         except MHSError as exc:
             return _fail(exc)
 
+    @server.tool()
+    async def clear_print_error(confirm: bool = False, printer: str | None = None) -> dict:
+        """Dismiss a print error that stays after the fault is over. Requires `confirm=True`.
+
+        Sends Bambu's `clean_print_error`, the same as dismissing the error on
+        the printer's screen. It does not move, heat or reboot anything. Use it
+        when `check_setup` reports an active alert that blocks new prints.
+
+        A latched HMS alert can survive it. In a real test on 2026-10-04 the
+        A1 mini acknowledged the command, but its extrusion force sensor alert
+        (HMS_0300_1800_0001_0003, raised when a print was stopped during its
+        start-up calibration) stayed until the printer was power-cycled. The
+        reply lists the alerts still active, so check it rather than assuming
+        it worked.
+        """
+        if not confirm:
+            return {
+                "ok": False,
+                "error": "ConfirmationRequired",
+                "message": "This dismisses the printer's current error; fix its cause first.",
+                "hint": "Call again with confirm=true.",
+            }
+        try:
+            app.require_writable("clear the print error")
+            device = await _printer(printer)
+            result = await device.clear_print_error()
+        except MHSError as exc:
+            return _fail(exc)
+        try:
+            remaining = [a.to_dict() for a in (await device.status()).alerts]
+        except MHSError as exc:
+            # The command went out; only the follow-up read failed.
+            return _ok(result=result, alerts_still_active=None,
+                       hint=f"Sent, but the status could not be read back ({exc.message}).")
+        body = _ok(result=result, alerts_still_active=remaining)
+        if any(a["code"].startswith("HMS_") for a in remaining):
+            body["hint"] = (
+                "An HMS alert is still reported. Status can lag a few seconds, so check "
+                "get_status again; if it stays, power-cycle the printer."
+            )
+        return body
+
     # ------------------------------------------------------------- controls
     @server.tool()
     async def set_temperature(
