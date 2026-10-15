@@ -209,6 +209,55 @@ class Mesh:
             "unit_scale_applied": self.unit_scale_applied,
         }
 
+    def local_thickness(self, max_mm: float, samples: int = 4000,
+                        seed: int = 0) -> tuple[np.ndarray, np.ndarray]:
+        """How much material lies behind the surface, sampled across it.
+
+        From each sample point a ray goes straight into the part, along the
+        inward normal; the distance to the next surface it meets is the local
+        thickness there - the size of the feature, whatever the triangles are
+        like. A 2 mm wall reads 2 mm whether it is drawn with ten triangles or
+        with ten thousand slivers on a spline corner.
+
+        Returns ``(thickness_mm, weight)``, one entry per sample, weights summing
+        to 1 (each sample stands for an equal share of the surface area). Thickness is ``inf``
+        where nothing is met within ``max_mm``: thicker than that, or an open
+        mesh. Samples are drawn with a fixed seed, so a model always reads the
+        same.
+        """
+        tris = self.triangles
+        areas = self.face_areas
+        total = float(areas.sum())
+        if total <= 0 or max_mm <= 0:
+            return np.full(1, np.inf), np.ones(1)
+
+        # Uniform over the surface: faces drawn by area, points uniform in each.
+        rng = np.random.default_rng(seed)
+        source = rng.choice(len(tris), size=samples, p=areas / total)
+        weight = np.full(samples, 1 / samples)
+        bary = rng.random((samples, 2))
+        flip = bary.sum(axis=1) > 1
+        bary[flip] = 1 - bary[flip]
+        v0 = tris[source, 0]
+        origins = (v0 + bary[:, :1] * (tris[source, 1] - v0)
+                   + bary[:, 1:] * (tris[source, 2] - v0))
+        # Normals point out of a correctly wound mesh; an inside-out one has a
+        # negative signed volume, and its rays must go the other way.
+        signed = np.einsum("ij,ij->i", tris[:, 0], np.cross(tris[:, 1], tris[:, 2])).sum()
+        inward = -self.face_normals[source] * (1.0 if signed >= 0 else -1.0)
+
+        ray, tri = _ray_candidates(tris, origins, inward, max_mm)
+        keep = tri != source[ray]
+        ray, tri = ray[keep], tri[keep]
+
+        thickness = np.full(len(origins), np.inf)
+        floor = 1e-6 * max(1.0, float(np.linalg.norm(self.dimensions)))
+        for start in range(0, len(ray), 1_000_000):
+            r, t = ray[start:start + 1_000_000], tri[start:start + 1_000_000]
+            hit = _ray_triangle_distance(origins[r], inward[r], tris[t], floor, max_mm)
+            np.minimum.at(thickness, r, hit)
+        return thickness, weight
+
     def estimated_mass_g(self, infill_fraction: float = 0.15, material: str = "PLA",
                          wall_fraction: float = 0.35) -> float:
         """Rough mass: solid shell fraction plus infill through the remainder.
@@ -221,6 +270,92 @@ class Mesh:
         density = FILAMENT_DENSITY.get(material.upper(), 1.24)
         solid_fraction = wall_fraction + (1 - wall_fraction) * max(0.0, min(1.0, infill_fraction))
         return (self.volume_mm3 / 1000.0) * solid_fraction * density
+
+
+# -- ray casting -----------------------------------------------------------
+#: A triangle covering more grid cells than this is tested against every ray
+#: instead of being binned; coarse meshes have few of them.
+_MAX_CELLS_PER_TRIANGLE = 4096
+_MAX_BINNED = 8_000_000
+
+
+def _ray_candidates(tris: np.ndarray, origins: np.ndarray, directions: np.ndarray,
+                    length: float) -> tuple[np.ndarray, np.ndarray]:
+    """(ray, triangle) pairs worth an exact test, from a uniform grid.
+
+    Triangles are binned by their bounding box grown by half a cell. Each ray
+    segment is sampled every half cell, so any triangle it crosses within
+    ``length`` sits in the cell of a sample point less than a quarter cell
+    away. Pairs are unique.
+    """
+    low = tris.min(axis=(0, 1))
+    diagonal = float(np.linalg.norm(tris.max(axis=(0, 1)) - low)) or 1.0
+    edges = np.linalg.norm(tris[:, 1] - tris[:, 0], axis=1)
+    cell = min(max(length / 2, float(np.median(edges))), diagonal / 50) or 1.0
+    while True:
+        lo = np.floor((tris.min(axis=1) - low) / cell - 0.5).astype(np.int64) + 1
+        hi = np.floor((tris.max(axis=1) - low) / cell + 0.5).astype(np.int64) + 1
+        span = hi - lo + 1
+        count = span.prod(axis=1)
+        big = count > _MAX_CELLS_PER_TRIANGLE
+        if count[~big].sum() <= _MAX_BINNED:
+            break
+        cell *= 1.5
+    shape = hi.max(axis=0) + 2
+
+    small = np.flatnonzero(~big)
+    counts = count[small]
+    owner = np.repeat(small, counts)
+    k = np.arange(counts.sum()) - np.repeat(np.cumsum(counts) - counts, counts)
+    sy, sz = span[owner, 1], span[owner, 2]
+    cx = lo[owner, 0] + k // (sy * sz)
+    cy = lo[owner, 1] + (k // sz) % sy
+    cz = lo[owner, 2] + k % sz
+    keys = (cx * shape[1] + cy) * shape[2] + cz
+    order = np.argsort(keys, kind="stable")
+    keys, owner = keys[order], owner[order]
+
+    steps = np.arange(0.0, length + cell / 2, cell / 2)
+    points = origins[:, None, :] + directions[:, None, :] * steps[None, :, None]
+    cells = np.floor((points - low) / cell).astype(np.int64) + 1
+    inside = ((cells >= 0) & (cells < shape)).all(axis=2)
+    ray_of = np.broadcast_to(np.arange(len(origins))[:, None], inside.shape)[inside]
+    cells = cells[inside]
+    lookup = (cells[:, 0] * shape[1] + cells[:, 1]) * shape[2] + cells[:, 2]
+    pairs = np.unique(ray_of * (int(lookup.max(initial=0)) + 1) + lookup)
+    ray_of, lookup = np.divmod(pairs, int(lookup.max(initial=0)) + 1)
+
+    first = np.searchsorted(keys, lookup, side="left")
+    last = np.searchsorted(keys, lookup, side="right")
+    found = last - first
+    ray = np.repeat(ray_of, found)
+    at = np.repeat(first - (np.cumsum(found) - found), found) + np.arange(found.sum())
+    tri = owner[at]
+
+    if big.any():
+        wide = np.flatnonzero(big)
+        ray = np.concatenate([ray, np.repeat(np.arange(len(origins)), len(wide))])
+        tri = np.concatenate([tri, np.tile(wide, len(origins))])
+    unique = np.unique(ray * len(tris) + tri)
+    return unique // len(tris), unique % len(tris)
+
+
+def _ray_triangle_distance(origins: np.ndarray, directions: np.ndarray, tris: np.ndarray,
+                           near: float, far: float) -> np.ndarray:
+    """Möller-Trumbore, one ray per triangle; ``inf`` where it misses."""
+    v0 = tris[:, 0]
+    e1, e2 = tris[:, 1] - v0, tris[:, 2] - v0
+    p = np.cross(directions, e2)
+    det = np.einsum("ij,ij->i", e1, p)
+    ok = np.abs(det) > 1e-12
+    inv = np.divide(1.0, det, out=np.zeros_like(det), where=ok)
+    s = origins - v0
+    u = np.einsum("ij,ij->i", s, p) * inv
+    q = np.cross(s, e1)
+    v = np.einsum("ij,ij->i", directions, q) * inv
+    t = np.einsum("ij,ij->i", e2, q) * inv
+    hit = ok & (u >= 0) & (v >= 0) & (u + v <= 1) & (t > near) & (t <= far)
+    return np.where(hit, t, np.inf)
 
 
 # -- loading ---------------------------------------------------------------

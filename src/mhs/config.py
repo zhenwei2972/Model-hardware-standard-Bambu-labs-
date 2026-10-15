@@ -64,6 +64,12 @@ class DeviceConfig:
     # "insecure"-> no verification at all; only for a trusted, isolated LAN
     tls_mode: str = "verify"
     upload_dir: str = "cache"
+    #: The build plate actually fitted, e.g. "Textured PEI Plate". A file sliced
+    #: for another plate targets the wrong bed temperature, which the printer
+    #: cannot detect - it heats to 35 C for a Cool Plate, the part never sticks,
+    #: and the job runs to completion over a model that came loose. Setting this
+    #: lets `mhs.preflight` catch the mismatch before anything moves.
+    plate_type: str = ""
     camera_port: int = 6000
     mqtt_port: int = 8883
     ftps_port: int = 990

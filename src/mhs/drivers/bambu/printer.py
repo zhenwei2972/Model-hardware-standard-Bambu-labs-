@@ -218,6 +218,15 @@ class BambuPrinter(Printer):
     async def stop_print(self) -> dict:
         return await self._simple_command(commands.stop)
 
+    async def clear_print_error(self) -> dict:
+        """Send ``clean_print_error``, the same as dismissing the error on the screen.
+
+        It clears ``print_error``. A latched HMS alert can outlive it: on
+        2026-10-04 the A1 mini acknowledged the command, but its force-sensor
+        alert (HMS_0300_1800_0001_0003) stayed until a power cycle.
+        """
+        return await self._simple_command(commands.clean_print_error)
+
     # -- optional controls -------------------------------------------------
     async def set_temperature(self, nozzle: float | None = None, bed: float | None = None) -> dict:
         await self._ensure_connected()

@@ -14,6 +14,49 @@ def codes(report) -> set[str]:
     return {f.code for f in report.findings}
 
 
+def box(low, high) -> tuple[np.ndarray, np.ndarray]:
+    cube = unit_cube(1)
+    unit = cube.vertices - cube.vertices.min(axis=0)
+    return unit * (np.asarray(high) - low) + low, cube.faces
+
+
+def combine(*parts) -> Mesh:
+    vertices, faces, offset = [], [], 0
+    for v, f in parts:
+        vertices.append(v)
+        faces.append(f + offset)
+        offset += len(v)
+    return Mesh(np.vstack(vertices), np.vstack(faces))
+
+
+def finned_block(fin_mm: float) -> Mesh:
+    """A 20 x 20 x 2 mm base carrying nine 6 mm tall fins, ``fin_mm`` thick."""
+    fins = [box((1 + 2 * i, 0, 2), (1 + 2 * i + fin_mm, 20, 8)) for i in range(9)]
+    return combine(box((0, 0, 0), (20, 20, 2)), *fins)
+
+
+def tube(outer: float, wall: float, height: float, segments: int) -> Mesh:
+    """A closed ring, like a phone bumper's wall, with ``segments`` slivers round it."""
+    a = np.linspace(0, 2 * np.pi, segments, endpoint=False)
+
+    def ring(r, z):
+        return np.c_[r * np.cos(a), r * np.sin(a), np.full(segments, z)]
+
+    inner = outer - wall
+    vertices = np.vstack([ring(outer, 0), ring(outer, height), ring(inner, 0), ring(inner, height)])
+    i = np.arange(segments)
+    j = (i + 1) % segments
+    ob, ot, ib, it = i, i + segments, i + 2 * segments, i + 3 * segments
+    obj, otj, ibj, itj = j, j + segments, j + 2 * segments, j + 3 * segments
+    faces = np.vstack([
+        np.c_[ob, obj, otj], np.c_[ob, otj, ot],  # outside
+        np.c_[ib, it, itj], np.c_[ib, itj, ibj],  # inside
+        np.c_[ot, otj, itj], np.c_[ot, itj, it],  # top
+        np.c_[ob, ib, ibj], np.c_[ob, ibj, obj],  # bottom
+    ])
+    return Mesh(vertices, faces)
+
+
 def test_a_sensible_part_has_no_blockers():
     report = analyze(unit_cube(30), A1_MINI)
     assert report.printable
@@ -40,12 +83,46 @@ def test_a_model_that_exceeds_one_axis_is_blocked():
 
 
 def test_detail_finer_than_the_nozzle_is_reported_quantitatively():
-    # A dense sphere shrunk to fingernail size: most edges fall under 0.4 mm.
-    tiny, _ = uv_sphere(20, 120, 80).scale_to_dimension(8.0)
-    report = analyze(tiny, A1_MINI)
+    # 0.25 mm fins under a 0.4 mm nozzle: most of the surface is on them.
+    report = analyze(finned_block(0.25), A1_MINI)
     assert report.metrics["detail_below_nozzle_percent"] > 50
+    assert report.metrics["feature_thickness_mm"]["median"] == pytest.approx(0.25, abs=0.01)
     assert "detail_too_fine" in codes(report)
     assert "will merge or disappear" in report.verdict()
+
+
+def test_fins_one_extrusion_wide_are_not_too_fine():
+    report = analyze(finned_block(1.0), A1_MINI)
+    assert report.metrics["detail_below_nozzle_percent"] < 2
+    assert "detail_too_fine" not in codes(report)
+
+
+def test_small_triangles_are_not_fine_detail():
+    """The 4 Oct bumper: 2.0 mm walls drawn with tiny triangles (5th-percentile
+    edge 0.007 mm) were reported as "39% of detail finer than the nozzle"."""
+    ring = tube(outer=20, wall=2.0, height=10, segments=3000)
+    report = analyze(ring, A1_MINI)
+    assert report.metrics["edge_length_mm"]["p05"] < 0.1  # far below the nozzle
+    assert report.metrics["detail_below_nozzle_percent"] < 1
+    assert not codes(report) & {"detail_too_fine", "detail_partially_fine", "thin_walls"}
+    assert "reproducible at this size" in report.verdict()
+
+    dense, _ = uv_sphere(20, 120, 80).scale_to_dimension(8.0)  # 8 mm solid, tiny facets
+    assert "detail_too_fine" not in codes(analyze(dense, A1_MINI))
+
+
+def test_local_thickness_reads_the_wall_not_the_triangles():
+    thickness, weight = tube(outer=20, wall=2.0, height=10, segments=3000).local_thickness(12.0)
+    assert weight.sum() == pytest.approx(1.0)
+    assert np.median(thickness) == pytest.approx(2.0, abs=0.01)
+    # Beyond the reach, nothing is met: reported as inf, never as thin.
+    capped, _ = tube(outer=20, wall=2.0, height=10, segments=3000).local_thickness(1.5)
+    assert np.isinf(capped).mean() > 0.9
+
+
+def test_a_thin_ring_is_both_too_fine_and_thin_walled():
+    report = analyze(tube(outer=20, wall=0.3, height=10, segments=600), A1_MINI)
+    assert {"detail_too_fine", "thin_walls"} <= codes(report)
 
 
 def test_a_coarse_model_at_a_sane_size_keeps_its_detail():
@@ -117,18 +194,27 @@ def test_report_serialises_for_a_tool_result():
 
 # -- scale advice ----------------------------------------------------------
 def test_scale_advice_quantifies_the_detail_lost():
-    model = uv_sphere(30, 96, 64)
-    advice = scale_advice(model, A1_MINI, 20.0)
-    assert advice["factor"] == pytest.approx(20 / 60, rel=1e-3)
-    assert advice["dimensions_after_mm"][0] == pytest.approx(20.0)
-    assert advice["detail_below_nozzle_percent_after"] > advice["detail_below_nozzle_percent_before"]
+    # 1 mm fins on a 20 mm block, shrunk to 7 mm: the fins become 0.35 mm.
+    advice = scale_advice(finned_block(1.0), A1_MINI, 7.0)
+    assert advice["factor"] == pytest.approx(7 / 20, rel=1e-3)
+    assert advice["dimensions_after_mm"][0] == pytest.approx(7.0)
+    assert advice["detail_below_nozzle_percent_before"] < 2
+    assert advice["detail_below_nozzle_percent_after"] > 40
     assert "printable threshold" in advice["note"]
 
 
 def test_scaling_up_recovers_detail():
-    advice = scale_advice(uv_sphere(10, 96, 64), A1_MINI, 120.0)
+    advice = scale_advice(finned_block(0.25), A1_MINI, 60.0)
     assert advice["factor"] > 1
-    assert advice["detail_below_nozzle_percent_after"] <= advice["detail_below_nozzle_percent_before"]
+    assert advice["detail_below_nozzle_percent_before"] > 50
+    assert advice["detail_below_nozzle_percent_after"] < 2
+
+
+def test_scale_advice_and_analyze_agree_at_the_same_size():
+    model = finned_block(0.25)
+    advice = scale_advice(model, A1_MINI, 20.0)
+    assert advice["detail_below_nozzle_percent_before"] == pytest.approx(
+        analyze(model, A1_MINI).metrics["detail_below_nozzle_percent"], abs=3)
 
 
 def test_scale_advice_respects_the_axis():

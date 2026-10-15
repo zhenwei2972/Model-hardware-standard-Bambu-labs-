@@ -85,7 +85,7 @@ class BambuFiles:
             ftp.login(user="bblp", passwd=self.access_code)
             ftp.prot_p()
             ftp.set_pasv(True)
-        except (ftplib.all_errors, OSError) as exc:  # type: ignore[misc]
+        except (*ftplib.all_errors, OSError) as exc:
             raise FileTransferError(
                 f"FTPS connect to {self.host}:{self.port} failed - {exc}",
                 hint="Access Code wrong, or LAN Only Mode / Developer Mode is off.",
@@ -134,28 +134,58 @@ class BambuFiles:
         directory, _, name = remote_path.rpartition("/")
         name = sanitize_remote_name(name)
 
+        remote = f"{directory}/{name}" if directory else name
+        size = source.stat().st_size
+
         ftp = self._connect()
         try:
             if directory:
                 _ensure_dir(ftp, directory)
             with source.open("rb") as fh:
-                ftp.storbinary(f"STOR /{directory}/{name}" if directory else f"STOR /{name}", fh)
-        except (ftplib.all_errors, OSError) as exc:  # type: ignore[misc]
-            raise FileTransferError(f"upload of {source.name} failed - {exc}") from exc
+                ftp.storbinary(f"STOR /{remote}", fh)
+        except (*ftplib.all_errors, OSError) as exc:
+            # The printer's FTPS server often never sends the closing reply: the
+            # bytes are all on the card, then the control socket times out. Ask
+            # the card how big the file is before believing the error.
+            landed = self._remote_size(remote)
+            if landed != size:
+                raise FileTransferError(
+                    f"upload of {source.name} failed - {exc}",
+                    hint=(
+                        f"{landed} of {size} bytes arrived."
+                        if landed is not None
+                        else "The file is not on the printer; check the network and retry."
+                    ),
+                ) from exc
+            log.info("upload of %s completed despite %s", source.name, exc)
         finally:
             _quietly_close(ftp)
-        return FileEntry(
-            name=name,
-            path=f"{directory}/{name}" if directory else name,
-            size_bytes=source.stat().st_size,
-        )
+        return FileEntry(name=name, path=remote, size_bytes=size)
+
+    def _remote_size(self, remote_path: str) -> int | None:
+        """Size of a file on the printer, or None if it is not there.
+
+        Used to tell a transfer that really failed from one the printer simply
+        never acknowledged.
+        """
+        ftp = None
+        try:
+            ftp = self._connect()
+            ftp.voidcmd("TYPE I")
+            return ftp.size(f"/{remote_path}")
+        except (*ftplib.all_errors, OSError) as exc:
+            log.debug("could not size /%s: %s", remote_path, exc)
+            return None
+        finally:
+            if ftp is not None:
+                _quietly_close(ftp)
 
     def delete(self, remote_path: str) -> None:
         remote_path = remote_path.strip("/")
         ftp = self._connect()
         try:
             ftp.delete(f"/{remote_path}")
-        except (ftplib.all_errors, OSError) as exc:  # type: ignore[misc]
+        except (*ftplib.all_errors, OSError) as exc:
             raise FileTransferError(f"delete of {remote_path} failed - {exc}") from exc
         finally:
             _quietly_close(ftp)

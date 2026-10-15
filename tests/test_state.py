@@ -107,6 +107,16 @@ def test_hms_and_print_error_become_alerts():
     assert any(c.startswith("PRINT_ERROR_") for c in codes)
 
 
+def test_alerts_reach_status_with_a_message():
+    """get_status showed HMS_0300_1800_0001_0003 and PRINT_ERROR_0300_400C undecoded."""
+    state = fresh_state()
+    state.apply({"print": {"hms": [{"attr": 0x0300_1800, "code": 0x0001_0003}], "print_error": 0x0300_400C}})
+    alerts = state.to_status().to_dict()["alerts"]
+    assert [a["code"] for a in alerts] == ["HMS_0300_1800_0001_0003", "PRINT_ERROR_0300_400C"]
+    assert all(a["message"] for a in alerts)
+    assert alerts[1]["message"] == "Print cancelled"
+
+
 def test_stale_telemetry_is_reported_offline():
     state = fresh_state()
     state.last_message_at = time.time() - 600

@@ -61,6 +61,16 @@ def stop(sequence_id: int = 0) -> dict:
     return _envelope("print", "stop", sequence_id, param="")
 
 
+def clean_print_error(sequence_id: int = 0) -> dict:
+    """Dismiss a stuck ``print_error``, the way tapping the screen does.
+
+    The firmware keeps the last print error in its status long after the fault
+    is over, and refuses new jobs while it is set. This clears the flag only; it
+    does not move, heat or reboot the machine.
+    """
+    return _envelope("print", "clean_print_error", sequence_id, subtask_id="0")
+
+
 def set_speed(level: int, sequence_id: int = 0) -> dict:
     if level not in SPEED_LEVELS:
         raise CommandRejected(f"speed level must be one of {sorted(SPEED_LEVELS)} (got {level!r})")
@@ -177,7 +187,10 @@ def project_file(
     """Start a sliced ``.3mf`` that already lives on the printer's storage.
 
     ``remote_path`` is the path on the printer ("cache/foo.3mf" or "/foo.3mf");
-    it is turned into the ``ftp:///...`` URL form the firmware expects.
+    it is turned into the ``file:///sdcard/...`` URL form the firmware expects.
+    An ``ftp:///...`` URL is accepted by the MQTT layer but the firmware cannot
+    resolve it, and reports the failed read as HMS 0500_C010 ("MicroSD card
+    read/write exception") with the file sitting intact on the card.
     """
     if plate < 1:
         raise CommandRejected("plate index is 1-based")
@@ -190,7 +203,7 @@ def project_file(
         "project_file",
         sequence_id,
         param=f"Metadata/plate_{plate}.gcode",
-        url=f"ftp:///{clean}",
+        url=f"file:///sdcard/{clean}",
         subtask_name=job_name or clean.rsplit("/", 1)[-1].rsplit(".", 1)[0],
         # All four ids are 0 for a LAN print; non-zero values make the printer
         # try to reconcile the job with a cloud task and refuse to start.

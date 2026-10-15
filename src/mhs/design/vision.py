@@ -19,7 +19,7 @@ import math
 import time
 from dataclasses import asdict, dataclass
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageStat
 
 from ..errors import CommandRejected
 
@@ -155,6 +155,28 @@ def _to_png(image: Image.Image) -> bytes:
     buffer = io.BytesIO()
     image.save(buffer, format="PNG", optimize=True)
     return buffer.getvalue()
+
+
+#: Mean luminance (0-255) below which a frame shows nothing useful. A lit
+#: chamber sits well above this even with a dark plate; an unlit one lands in
+#: the teens, where the plate, the part and a failed print look identical.
+DARK_FRAME_LUMINANCE = 40.0
+
+
+def mean_luminance(frame: bytes | Image.Image) -> float:
+    """Average brightness of a frame, 0 (black) to 255 (white)."""
+    grey = _open(frame).convert("L")
+    return float(ImageStat.Stat(grey).mean[0]) if grey.width and grey.height else 0.0
+
+
+def frame_is_dark(frame: bytes | Image.Image, threshold: float = DARK_FRAME_LUMINANCE) -> bool:
+    """Is this frame too dark to read anything off?
+
+    The chamber camera has no low-light mode, so an unlit chamber returns a
+    black rectangle rather than a dim photo: worth turning the light on and
+    taking the shot again.
+    """
+    return mean_luminance(frame) < threshold
 
 
 def annotate_grid(

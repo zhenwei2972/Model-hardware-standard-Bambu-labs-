@@ -27,7 +27,7 @@ from .design.printability import scale_advice
 from .design.render import render_to_png
 from .errors import MHSError
 from .models import PrintOptions
-from .monitor import MILESTONES, build_report, stage_name
+from .monitor import MILESTONES, build_report, report_markdown, stage_name
 from .scheduler import parse_when
 from .specs import spec_for
 from .standard.descriptor import descriptor_markdown
@@ -108,8 +108,32 @@ async def cmd_files(app, args) -> int:
     return 0
 
 
+def _warn_about(app, device_id: str, local_path: str, plate: int = 1) -> None:
+    """Say what a sliced file gets wrong, before it reaches the machine.
+
+    Printed rather than raised: sending the file is the operator's call, but a
+    bed temperature the filament cannot stick to is worth hearing about first.
+    The printer runs the whole job either way and reports success.
+    """
+    from .preflight import preflight
+
+    try:
+        plate_type = app.settings.devices[device_id].plate_type
+    except KeyError:
+        plate_type = ""
+    try:
+        _, findings = preflight(local_path, plate=plate, plate_type=plate_type)
+    except Exception:  # noqa: BLE001 - a file we cannot parse is not an error here
+        return
+    for finding in findings:
+        print(f"{finding.severity}: {finding.message}", file=sys.stderr)
+        if finding.suggestion:
+            print(f"hint:  {finding.suggestion}", file=sys.stderr)
+
+
 async def cmd_upload(app, args) -> int:
     printer = await _printer(app, args)
+    _warn_about(app, printer.device_id, args.local_path)
     entry = await printer.upload_file(args.local_path, args.name)
     print(f"uploaded {entry.path} ({entry.size_bytes or 0} bytes)")
     return 0
@@ -292,6 +316,9 @@ async def cmd_report(app, args) -> int:
     if args.json:
         _print_json(report)
         return 0
+    if args.markdown:
+        print(report_markdown(report))
+        return 0
 
     print(report["summary"])
     print()
@@ -366,6 +393,41 @@ async def cmd_doctor(app, args) -> int:
             print(f"  {label:<10} ERROR {type(exc).__name__}: {exc}")
     _doctor_verdict(ok)
     return 0 if ok else 1
+
+
+async def cmd_setup(app, args) -> int:
+    """Is this machine ready to print, and what is missing if not?
+
+    `doctor` answers "can I reach it". This answers "is it configured", which is
+    the question that decides whether the first print works.
+    """
+    from .setup import build_report
+
+    config = app.settings.get(args.printer)
+    status = None
+    try:
+        device = await _printer(app, args)
+        status = await device.status()
+    except MHSError as exc:
+        print(f"could not read status: {exc.message}", file=sys.stderr)
+
+    report = build_report(config.device_id, config, status, app.settings.read_only)
+
+    print(f"{report.device_id}  model={report.model}  {'READY' if report.ready else 'NOT READY'}")
+    if report.observed.get("plate_type"):
+        print(f"  plate: {report.observed['plate_type']}")
+    for finding in report.findings:
+        print(f"  {finding.severity}: {finding.message}")
+        if finding.suggestion:
+            print(f"    -> {finding.suggestion}")
+
+    rec = report.recommended
+    print(f"\nrecommended starting point for a {report.model}:")
+    print(f"  plate {rec.plate_type}, {rec.material} at {rec.nozzle_c:g} C nozzle / {rec.bed_c:g} C bed")
+    print(f"  layer height {rec.layer_height_mm:g} mm")
+    for note in rec.notes:
+        print(f"  - {note}")
+    return 0 if report.ready else 1
 
 
 def _doctor_verdict(ok: bool, unreachable: bool = False) -> None:
@@ -466,7 +528,10 @@ async def cmd_slice(app, args) -> int:
         target = Path(args.output) if (args.output and len(names) == 1) else app.slice_path(
             f"{Path(args.path).stem}-{name}", suffix
         )
-        result = slicer.slice(args.path, target, settings)
+        config = app.settings.get(args.printer) if app.settings.devices else None
+        result = slicer.slice(args.path, target, settings,
+                              printer_model=config.model if config else None,
+                              plate_type=config.plate_type if config else "")
         rows.append((name, meta, result))
         print(f"{name:9} {result.summary()}")
         print(f"          -> {result.output_path}")
@@ -848,6 +913,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = add("report", cmd_report, "how a print went, stage by stage")
     p.add_argument("run_id", type=int)
     p.add_argument("--json", action="store_true")
+    p.add_argument("--markdown", action="store_true", help="a readable page you can share (no local paths)")
 
     p = add("inspect", cmd_inspect, "measure a mesh and check it against the printer")
     p.add_argument("path")
@@ -948,6 +1014,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     add("scheduler", cmd_scheduler, "run the scheduler in the foreground")
     add("doctor", cmd_doctor, "check every transport and explain what is broken")
+    add("setup", cmd_setup, "is this machine configured to print, and what is missing")
     add("serve", cmd_serve, "run the MCP server over stdio", needs_app=False)
     return parser
 

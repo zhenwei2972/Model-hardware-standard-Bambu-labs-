@@ -19,6 +19,7 @@ import logging
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from .errors import MHSError
 from .models import PrinterStatus, PrintState
@@ -69,6 +70,9 @@ MILESTONES: dict[str, Milestone] = {
 #: Progress-based milestones, as a fraction of total layers.
 _PROGRESS_POINTS = (("quarter", 0.25), ("half", 0.5), ("three_quarters", 0.75))
 
+#: Milestones that end the job being watched. The watcher stops at the first.
+TERMINAL_MILESTONES = ("finished", "failed")
+
 
 def detect_milestones(
     previous: PrinterStatus | None, current: PrinterStatus
@@ -114,6 +118,33 @@ def detect_milestones(
     return crossed
 
 
+def job_changed(
+    previous: PrinterStatus | None, current: PrinterStatus, *, following: bool
+) -> str | None:
+    """Why ``current`` belongs to a different job than the one being followed.
+
+    ``following`` says whether the watcher has already seen its job start. A
+    job that starts on its own after the watched one must not be filed under
+    the watched run: on 5 Oct a job nobody sent started 1 h 50 min after run 13
+    finished, and was recorded as run 13 failing.
+    """
+    if previous is None or not following:
+        return None
+    if current.state.is_active and not previous.state.is_active:
+        return f"another job started ({current.job_name or 'unnamed'})"
+    # While preparing, the printer can still report the last job's name and
+    # layer, so only compare once this one is actually printing.
+    if previous.state not in (PrintState.RUNNING, PrintState.PAUSED) or not current.state.is_active:
+        return None
+    if previous.job_name and current.job_name and previous.job_name != current.job_name:
+        return f"the job changed from {previous.job_name} to {current.job_name}"
+    # Layers only count up within a job; going back means it started again.
+    before, after = previous.current_layer, current.current_layer
+    if before is not None and after is not None and after < before:
+        return f"the layer count went back from {before} to {after}, so a job restarted"
+    return None
+
+
 @dataclass
 class PrintMonitor:
     """Polls one printer and records a frame at each milestone."""
@@ -131,6 +162,10 @@ class PrintMonitor:
     _stopping: asyncio.Event = field(default_factory=asyncio.Event, init=False, repr=False)
     _previous: PrinterStatus | None = field(default=None, init=False, repr=False)
     _seen: set[str] = field(default_factory=set, init=False, repr=False)
+    #: Whether the job being watched has been seen running.
+    _following: bool = field(default=False, init=False, repr=False)
+    #: Why the watcher stopped on its own: the job ended, or another replaced it.
+    ended: str | None = field(default=None, init=False)
 
     @property
     def running(self) -> bool:
@@ -156,7 +191,7 @@ class PrintMonitor:
             self._task = None
 
     async def _loop(self) -> None:
-        while not self._stopping.is_set():
+        while not self._stopping.is_set() and self.ended is None:
             try:
                 await self.tick()
             except Exception:  # pragma: no cover - a watcher must outlive a bad poll
@@ -165,10 +200,27 @@ class PrintMonitor:
                 await asyncio.wait_for(self._stopping.wait(), timeout=self.poll_interval)
 
     async def tick(self) -> list[dict]:
-        """Poll once, record anything crossed. Returns what it recorded."""
+        """Poll once, record anything crossed. Returns what it recorded.
+
+        Once the watched job has finished or failed, or another job has taken
+        its place, nothing more is recorded and the loop ends.
+        """
+        if self.ended is not None:
+            return []
         status = await self.status_fn()
+        if status.state in (PrintState.OFFLINE, PrintState.UNKNOWN):
+            # No news. Compare the next real report against the last one, so a
+            # Wi-Fi drop mid-print does not read as the job starting again.
+            return []
+        changed = job_changed(self._previous, status, following=self._following)
+        if changed:
+            self.ended = changed
+            log.info("%s: stopped watching run %s: %s", self.device_id, self.run_id, changed)
+            return []
         crossed = detect_milestones(self._previous, status)
         self._previous = status
+        if status.state.is_active:
+            self._following = True
 
         recorded = []
         for name, detail in crossed:
@@ -181,6 +233,11 @@ class PrintMonitor:
                 continue
             self._seen.add(key)
             recorded.append(await self._record(name, detail, status))
+
+        terminal = next((name for name, _ in crossed if name in TERMINAL_MILESTONES), None)
+        if terminal:
+            self.ended = f"the job {terminal}"
+            log.info("%s: run %s %s; watcher done", self.device_id, self.run_id, terminal)
         return recorded
 
     async def _record(self, name: str, detail: str, status: PrinterStatus) -> dict:
@@ -194,11 +251,13 @@ class PrintMonitor:
             except MHSError as exc:
                 log.info("no frame for %s on %s: %s", name, self.device_id, exc.message)
 
+        # At "start" the printer still reports the previous job's layer.
+        layer = 0 if name == "start" else status.current_layer
         observation_id = self.store.add_observation(
             self.device_id,
             kind=f"stage:{name}",
             run_id=self.run_id,
-            layer=status.current_layer,
+            layer=layer,
             text=detail,
             image_path=image_path,
         )
@@ -207,7 +266,7 @@ class PrintMonitor:
             "observation_id": observation_id,
             "milestone": name,
             "detail": detail,
-            "layer": status.current_layer,
+            "layer": layer,
             "progress_percent": status.progress_percent,
             "image_path": image_path,
             "at": iso(time.time()),
@@ -223,6 +282,15 @@ def build_report(run: dict, milestones: list[dict]) -> dict:
     """
     settings = run.get("settings") or {}
     started, ended = run.get("started_at"), run.get("ended_at")
+    outcome, ended_iso, ended_from = run.get("outcome"), run.get("ended_at_iso"), "logged"
+    final = [m for m in milestones if stage_name(str(m.get("kind", ""))) in ("finished", "failed")]
+    if not ended and final:
+        # Nobody logged the result yet, but the watcher saw the job end.
+        last = max(final, key=lambda m: m.get("created_at") or 0)
+        ended, ended_iso = last.get("created_at"), iso(last.get("created_at"))
+        ended_from = "the watcher's final frame"
+        if not outcome or outcome == "in_progress":
+            outcome = stage_name(str(last.get("kind")))
     actual_minutes = round((ended - started) / 60) if started and ended else None
     # A print that rounds to zero minutes is still a measured duration, so the
     # comparison below tests for None rather than for truth.
@@ -255,12 +323,13 @@ def build_report(run: dict, milestones: list[dict]) -> dict:
         "device_id": run.get("device_id"),
         "job_name": run.get("job_name"),
         "file": run.get("remote_path"),
-        "outcome": run.get("outcome"),
+        "outcome": outcome,
         "quality_score": run.get("quality_score"),
         "notes": run.get("notes"),
         "settings": settings,
         "started_at": run.get("started_at_iso"),
-        "ended_at": run.get("ended_at_iso"),
+        "ended_at": ended_iso,
+        "ended_from": ended_from if ended_iso else None,
         "duration_minutes": actual_minutes,
         "predicted_minutes": predicted,
         "timeline": timeline,
@@ -268,6 +337,10 @@ def build_report(run: dict, milestones: list[dict]) -> dict:
         "uncaptioned_images": uncaptioned,
         "missing_milestones": [m for m in ("start", "first_layer", "finished") if m not in seen],
     }
+    pauses = [row for row in timeline if row["milestone"] in ("paused", "alert")]
+    if pauses:
+        report["interruptions"] = [{"at": row["at"], "layer": row["layer"], "detail": row["detail"]}
+                                   for row in pauses]
     if predicted and actual_minutes is not None:
         drift = (actual_minutes - predicted) / predicted * 100
         report["time_vs_estimate"] = {
@@ -279,6 +352,8 @@ def build_report(run: dict, milestones: list[dict]) -> dict:
                 else f"{'over' if drift > 0 else 'under'} the estimate by {abs(drift):.0f}%"
             ),
         }
+        if pauses:
+            report["time_vs_estimate"]["note"] += " (includes time paused, so not like for like)"
     report["summary"] = _summarise(report)
     return report
 
@@ -302,6 +377,49 @@ def _summarise(report: dict) -> str:
     if report.get("missing_milestones"):
         bits.append("no frame for: " + ", ".join(report["missing_milestones"]))
     return ", ".join(bits)
+
+
+def report_markdown(report: dict, include_paths: bool = False) -> str:
+    """The run report as a page a person can read (and share).
+
+    Local image paths are left out unless asked for, so the page can be
+    published without pointing at someone's disk.
+    """
+    title = report.get("job_name") or f"run {report.get('run_id')}"
+    lines = [f"# Print report: {title}", ""]
+    facts = [
+        ("Printer", report.get("device_id")),
+        ("File", Path(report["file"]).name if report.get("file") else None),
+        ("Started", report.get("started_at")),
+        ("Ended", f"{report['ended_at']} (from {report.get('ended_from')})"
+                  if report.get("ended_at") else "not yet"),
+        ("Outcome", report.get("outcome") or "not recorded"),
+    ]
+    drift = report.get("time_vs_estimate")
+    if drift:
+        facts.append(("Time", f"{drift['actual_minutes']} min actual (MEASURED) vs "
+                              f"{drift['predicted_minutes']} min slicer estimate (ESTIMATED): "
+                              f"{drift['note']}"))
+    elif report.get("duration_minutes") is not None:
+        facts.append(("Time", f"{report['duration_minutes']} min (MEASURED); no slicer estimate recorded"))
+    lines += ["| | |", "|---|---|"] + [f"| {k} | {v} |" for k, v in facts if v is not None] + [""]
+
+    interruptions = report.get("interruptions") or []
+    if interruptions:
+        lines += ["## Interruptions", ""]
+        lines += [f"- {row['at']}, layer {row['layer']}: {row['detail']}" for row in interruptions]
+        lines += [""]
+
+    lines += ["## What the camera saw", "", "| When | Stage | Layer | What is visible |", "|---|---|---|---|"]
+    for row in report.get("timeline", []):
+        seen = row.get("caption") or ("(not captioned yet)" if row.get("image_path") else "(no frame)")
+        if include_paths and row.get("image_path"):
+            seen += f" `{row['image_path']}`"
+        when = (row.get("at") or "")[11:19] or row.get("at") or ""
+        layer = row.get("layer") if row.get("layer") is not None else ""
+        lines.append(f"| {when} | {row['milestone']} | {layer} | {seen.replace('|', '/')} |")
+    lines += ["", f"_{report.get('summary', '')}_", ""]
+    return "\n".join(lines)
 
 
 def stage_name(kind: str) -> str:

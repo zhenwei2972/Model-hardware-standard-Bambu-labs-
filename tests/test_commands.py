@@ -8,12 +8,14 @@ from mhs.drivers.bambu import commands
 from mhs.errors import CommandRejected
 
 
-def test_project_file_uses_ftp_url_and_zero_cloud_ids():
+def test_project_file_uses_sdcard_url_and_zero_cloud_ids():
     payload = commands.project_file("cache/bracket.3mf", plate=2, job_name="bracket", sequence_id=7)
     body = payload["print"]
     assert body["command"] == "project_file"
     assert body["sequence_id"] == "7"
-    assert body["url"] == "ftp:///cache/bracket.3mf"
+    # An ftp:/// url is acknowledged but never resolved: the firmware reports the
+    # failed read as HMS 0500_C010 while the file sits intact on the card.
+    assert body["url"] == "file:///sdcard/cache/bracket.3mf"
     assert body["param"] == "Metadata/plate_2.gcode"
     assert body["subtask_name"] == "bracket"
     assert {body["project_id"], body["profile_id"], body["task_id"], body["subtask_id"]} == {"0"}
@@ -24,12 +26,19 @@ def test_project_file_uses_ftp_url_and_zero_cloud_ids():
 def test_project_file_derives_job_name_from_filename():
     body = commands.project_file("/cache/some part v2.3mf")["print"]
     assert body["subtask_name"] == "some part v2"
-    assert body["url"] == "ftp:///cache/some part v2.3mf"
+    assert body["url"] == "file:///sdcard/cache/some part v2.3mf"
 
 
 def test_project_file_rejects_unsliced_input():
     with pytest.raises(CommandRejected):
         commands.project_file("model.stl")
+
+
+def test_clean_print_error_clears_the_stuck_flag():
+    body = commands.clean_print_error(sequence_id=4)["print"]
+    assert body["command"] == "clean_print_error"
+    assert body["sequence_id"] == "4"
+    assert body["subtask_id"] == "0"
 
 
 def test_ams_mapping_is_right_aligned():
@@ -94,3 +103,25 @@ def test_pause_resume_stop_shape():
         body = builder(4)["print"]
         assert body["param"] == ""
         assert body["sequence_id"] == "4"
+
+
+async def test_the_driver_clears_a_print_error_with_clean_print_error(monkeypatch):
+    """No tool used to send this, although check_setup told people to."""
+    from mhs.config import PrinterConfig
+    from mhs.drivers import build
+
+    printer = build(PrinterConfig(device_id="a1mini", driver="bambu", model="A1 mini",
+                                  host="192.0.2.10", serial="01P00A000000000",
+                                  access_code="12345678"))
+    sent: list[dict] = []
+
+    async def connected():
+        return None
+
+    monkeypatch.setattr(printer, "_ensure_connected", connected)
+    monkeypatch.setattr(
+        printer._mqtt, "publish_and_wait",
+        lambda payload, timeout=None: sent.append(payload) or {"acknowledged": True},
+    )
+    assert (await printer.clear_print_error())["acknowledged"] is True
+    assert sent[0]["print"]["command"] == "clean_print_error"

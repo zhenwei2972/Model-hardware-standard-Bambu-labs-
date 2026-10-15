@@ -111,6 +111,10 @@ class Printer(Device):
     @abc.abstractmethod
     async def stop_print(self) -> dict: ...
 
+    async def clear_print_error(self) -> dict:
+        """Dismiss a print error the printer keeps reporting after the fault is over."""
+        raise NotSupported(f"{self.driver_name} cannot clear print errors")
+
     # -- optional controls -------------------------------------------------
     async def set_temperature(self, nozzle: float | None = None, bed: float | None = None) -> dict:
         raise NotSupported(f"{self.driver_name} cannot set temperatures")

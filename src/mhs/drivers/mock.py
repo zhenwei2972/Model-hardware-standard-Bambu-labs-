@@ -200,6 +200,11 @@ class MockPrinter(Printer):
         self.commands.append(("stop", {}))
         return {"acknowledged": True, "success": True}
 
+    async def clear_print_error(self) -> dict:
+        self.alerts = [a for a in self.alerts if not a.code.startswith("PRINT_ERROR_")]
+        self.commands.append(("clear_print_error", {}))
+        return {"acknowledged": True, "success": True}
+
     async def set_temperature(self, nozzle: float | None = None, bed: float | None = None) -> dict:
         self.commands.append(("set_temperature", {"nozzle": nozzle, "bed": bed}))
         return {"acknowledged": True, "success": True}

@@ -64,6 +64,36 @@ async def test_stop_print_requires_confirmation(server):
     assert (await call(server, "get_status"))["status"]["state"] == "idle"
 
 
+async def test_clear_print_error_requires_confirmation_and_reports_what_stays(server):
+    """The 4 Oct run: the print error cleared, the force-sensor HMS alert did not."""
+    from mhs.models import DeviceAlert
+
+    printer = await server.mhs_app.printer()
+    printer.alerts = [
+        DeviceAlert(code="PRINT_ERROR_0300_400C", severity="serious", message="Print cancelled"),
+        DeviceAlert(code="HMS_0300_1800_0001_0003", severity="fatal"),
+    ]
+
+    body = await call(server, "clear_print_error")
+    assert body["ok"] is False and body["error"] == "ConfirmationRequired"
+    assert len(printer.alerts) == 2 and ("clear_print_error", {}) not in printer.commands
+
+    body = await call(server, "clear_print_error", confirm=True)
+    assert body["ok"] is True and body["result"]["acknowledged"] is True
+    assert [a["code"] for a in body["alerts_still_active"]] == ["HMS_0300_1800_0001_0003"]
+    assert "power-cycle" in body["hint"]
+
+
+async def test_clear_print_error_is_refused_in_read_only_mode(settings, monkeypatch):
+    monkeypatch.setattr(settings, "read_only", True)
+    srv = create_server(settings, run_scheduler=False)
+    try:
+        body = await call(srv, "clear_print_error", confirm=True)
+        assert body["ok"] is False and body["error"] == "ControlDisabled"
+    finally:
+        srv.mhs_app.store.close()
+
+
 async def test_pause_and_resume(server):
     await call(server, "start_print", file="cache/benchy.3mf", confirm=True)
     assert (await call(server, "pause_print"))["ok"] is True
