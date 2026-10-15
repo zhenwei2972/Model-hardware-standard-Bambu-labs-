@@ -1,498 +1,112 @@
-# MHS — an MCP server for Bambu Lab printers and Roborock vacuums
+# Let Claude run your Bambu Lab 3D printer
 
 <!-- mcp-name: io.github.zhenwei2972/mhs-printer -->
 
-Connect Claude (or any MCP client) to real hardware:
+Talk to your printer in plain words. Claude can check whether it's free, prepare a model with
+**Bambu Studio** (Bambu Lab's own slicer), check the file is safe to print, start the print, watch it
+through the printer's camera, and tell you afterwards how it went.
 
-* **Bambu Lab A1 mini, A1, P1P, P1S, X1** over your local network, no cloud
-  account — slice a model for speed or for quality, start and schedule prints,
-  watch each stage through the chamber camera and get a report on how the print
-  went, measure printed parts against a reference object, and find out what the
-  machine cannot reproduce before wasting filament on it.
-* **Roborock Saros 10, 10R, Z70** — send the robot to a point you picked off its
-  map, clean rooms by name, save named locations, and drive the dock.
+It works over your home network with no cloud account, and it asks you before anything starts.
 
-Built on a vendor-neutral driver layer and aligned to Anthropic's
+> *"Is the printer free? Print `bracket.stl` for strength, and show me the first layer when it's down."*
+>
+> *"How did last night's print go?"*
+>
+> *"This error popped up on the printer screen. What does it mean?"*
+
+**Printers:** Bambu Lab A1 mini, A1, P1P, P1S, X1 Carbon, X1E. It also drives Roborock Saros robot
+vacuums: see [docs/ROBOROCK.md](docs/ROBOROCK.md).
+
+## What you need
+
+- A Bambu Lab printer on the same Wi-Fi network as your computer.
+- A Mac, Windows or Linux computer with **Python 3.10 or newer**. The `python3` that comes with macOS is
+  3.9, which is too old; the steps below install a newer one for you.
+- **[Bambu Studio](https://bambulab.com/en/download/studio)**, installed as normal. Claude uses it to
+  prepare models.
+- **Claude Desktop** or **Claude Code**.
+
+## Set it up (about 15 minutes)
+
+**1. Let the printer accept commands from your network.** On the printer's screen go to
+**Settings → WLAN**:
+
+- Turn on **LAN Only Mode**.
+- **Restart the printer.**
+- Turn on **Developer Mode**. It only appears after the restart.
+
+Note: in LAN Only Mode the Bambu Handy phone app stops working with the printer. Bambu Studio still
+works, and turning LAN Only Mode off brings Handy back.
+
+**2. Write down three things** from the same screen:
+
+- the **IP address** (e.g. `192.168.1.42`);
+- the **Access Code** (8 characters);
+- the **serial number** (also on the sticker at the back; an A1 mini's starts with `030`).
+
+**3. Install.** Open a terminal and run:
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh            # once; or: brew install uv
+git clone https://github.com/zhenwei2972/Model-hardware-standard-Bambu-labs-.git mhs && cd mhs
+uv venv --python 3.12 && uv pip install -e .
+echo "$PWD/.venv/bin/mhs-mcp"                                # copy this path for the next step
+```
+
+**4. Connect it to Claude.**
+
+- **Claude Desktop.** Open **Settings → Developer → Edit Config** and add the block below, using the path
+  from step 3 and your three values. Then quit and reopen Claude Desktop.
+  ```json
+  {"mcpServers": {"mhs": {"command": "/the/path/from/step/3/mhs-mcp",
+    "env": {"BAMBU_HOST": "192.168.1.42", "BAMBU_SERIAL": "0309CA1234567890", "BAMBU_ACCESS_CODE": "12345678"}}}}
+  ```
+- **Claude Code.** Run this in the `mhs` folder:
+  ```bash
+  claude mcp add mhs --env BAMBU_HOST=192.168.1.42 --env BAMBU_SERIAL=0309CA1234567890 \
+    --env BAMBU_ACCESS_CODE=12345678 -- "$PWD/.venv/bin/mhs-mcp"
+  ```
+
+To try it without letting it print anything yet, also add `MHS_READ_ONLY=1`. Claude can then look but
+not touch.
+
+**5. Check it works.** Ask Claude: *"Is my printer connected? Is it set up to print?"* It answers with
+the printer's status and anything missing, such as no filament loaded.
+
+Stuck? [docs/SETUP.md](docs/SETUP.md) shows what each common problem looks like and how to fix it.
+
+## How it keeps your printer safe
+
+- **Nothing starts without a yes.** Starting, stopping and clearing errors each need a second, explicit
+  confirmation.
+- **Every file is checked before printing.** Models are prepared with your printer's own Bambu Studio
+  profile, and the file is checked to be marked for your model. The plate temperature must suit the
+  filament and the plate on your printer. A print is refused while the printer is busy or showing a
+  serious error, and any problem is explained.
+- **Error codes in plain words.** Printer errors are translated using Bambu's published list, and it says
+  so when a code isn't on that list.
+- **Your details stay at home.** The access code is kept on your computer and only ever sent to your
+  printer, over an encrypted connection.
+
+## See it in action
+
+- **[Example print report](docs/examples/print-report-bracelet-stand.md).** A real print with a 40-minute
+  filament pause, explained stage by stage.
+- **[From request to print](docs/CASE_STUDY_DETOLF.md).** A display riser for an IKEA Detolf cabinet,
+  designed, checked, printed and fitted.
+- **[A full test run](docs/RUN_REPORT_2026-10-04_BUMPER.md).** A phone bumper, including the bug the run
+  uncovered and how it was fixed.
+- **[benchscale](https://github.com/zhenwei2972/benchscale)**, the companion project. It designs lab
+  parts around the real objects they hold, and these tools print them.
+
+## More detail
+
+- [Technical reference](docs/REFERENCE.md): every tool, the architecture, the safety model in detail,
+  and tests.
+- [Setup troubleshooting](docs/SETUP.md) · [Watching prints](docs/MONITORING.md) ·
+  [The design loop](docs/DESIGN_LOOP.md) · [Roborock vacuums](docs/ROBOROCK.md)
+
+It is aligned with Anthropic's
 [Model Hardware Standard](https://www.anthropic.com/news/model-hardware-standard-research-preview):
-`read`/`write` primitives over named channels, a discoverable device
-descriptor, and safety limits enforced in the driver rather than the prompt.
-
-**Supported hardware:** Bambu Lab A1 mini · A1 · P1P · P1S · X1 Carbon · X1E
-(LAN MQTT 8883, FTPS 990, chamber camera 6000) · Roborock Saros 10 · Saros 10R ·
-Saros Z70 and the wider V1 vacuum family (Roborock cloud).
-**Works with:** Claude Code, Claude Desktop, and any MCP-compatible client.
-
-```
-                     ┌─ standard/  read/write channels + limits + device descriptor
-Claude ─MCP(stdio)─▶ │             (the MHS surface — identical for every device)
-                     ├─ design/    mesh · render · printability · camera & map measurement
-    mhs server ──────┼─ slicing/   drives OrcaSlicer / Bambu Studio / PrusaSlicer, by intent
-                     ├─ monitor    print stages · captioned frames · run report
-                     ├─ scheduler + print journal + named locations (SQLite)
-                     │
-                     └─ Device ─┬─ Printer ─┬─ bambu     MQTT 8883 · FTPS 990 · cam 6000
-                                │           └─ mock
-                                └─ Vacuum ──┬─ roborock  cloud MQTT (via python-roborock)
-                                            └─ mock_vacuum
-```
-
-## Relationship to Anthropic's Model Hardware Standard
-
-[MHS](https://www.anthropic.com/news/model-hardware-standard-research-preview) is
-Anthropic's specification for letting AI agents safely operate physical
-equipment, opened as a research preview on 27 August 2026 with HHMI Janelia,
-Genentech, Tecan, Universal Robots and others. Its full specification and
-reference implementation are **not public yet** - Anthropic has said it will
-open-source them after the preview - so nothing here can claim conformance to a
-published schema. What this repository does is implement the four properties the
-announcement describes, in the places where they change the code rather than the
-marketing:
-
-| MHS property | Where it lives here |
-| --- | --- |
-| `read`/`write` primitives over named channels | `Printer.read()` / `Printer.write()`, built in `device.py` from each driver's capabilities |
-| A device description an agent can enumerate | `describe_device` / `mhs://printer/{id}/descriptor`, generated in `standard/descriptor.py` |
-| Natural-language tags for what the device is | the `tags` and `cannot` sections of that descriptor |
-| Safety limits in the driver, not the prompt | `SafetyLimit` on each channel, checked before dispatch (`standard/channels.py`) |
-
-The last one is the load-bearing difference. `write("nozzle.temperature", 350)`
-is refused by the driver with the reason attached - "the A1 mini hotend is rated
-to 300 C" - and no prompt wording, tool argument or retry gets around it,
-because the check runs before anything reaches the hardware.
-
-When the specification lands, `standard/descriptor.py` is the one file that has
-to change to emit the official format.
-
-Bambu Lab publishes no official local API of its own, so the transport layer is
-built on the community-documented interfaces in
-[OpenBambuAPI](https://github.com/Doridian/OpenBambuAPI). Other Bambu MCP servers
-exist ([griches](https://github.com/griches/bambu-mcp),
-[schwarztim](https://github.com/schwarztim/bambu-mcp),
-[DMontgomery40](https://github.com/DMontgomery40/mcp-3D-printer-server)); they are
-mostly MQTT wrappers. What is different here is the MHS channel layer, a driver
-interface that is not Bambu-specific, a persistent scheduler, and the design loop
-below.
-
-## What works today
-
-Discovery and the MHS primitives are shared by every device; the rest is per
-device kind.
-
-| Area | Tools |
-| --- | --- |
-| Discovery | `list_devices`, `get_printer_info`, `check_connection`, `describe_device` |
-| MHS primitives | `list_channels`, `read_channel`, `write_channel` |
-
-### 3D printers
-
-| Area | Tools |
-| --- | --- |
-| Monitoring | `get_status` (state, layer, progress, temps, filament, decoded HMS alerts) |
-| Files | `list_files`, `upload_file` |
-| Printing | `start_print`, `upload_and_print`, `pause_print`, `resume_print`, `stop_print`, `clear_print_error` |
-| Controls | `set_temperature`, `set_light`, `set_print_speed`, `send_gcode` (safe-listed) |
-| Camera | `capture_snapshot` (returns the JPEG to the model), `capture_frames`, `read_capture` |
-| Scheduling | `schedule_print`, `list_scheduled_jobs`, `cancel_scheduled_job` |
-| Model | `analyze_model`, `preview_model`, `scale_model` |
-| Slicing | `list_slice_intents`, `slice_model`, `compare_slice_intents`, `slice_and_print` |
-| Stages | `watch_print`, `watch_status`, `stop_watching_print`, `list_print_stages`, `review_print_stages`, `caption_print_stage`, `print_report` |
-| Measuring | `camera_grid`, `camera_calibrate`, `camera_measure`, `read_annotated_image` |
-| Iteration | `log_print_result`, `record_observation`, `list_print_history`, `get_print_run` |
-| Resources | `mhs://printers`, `mhs://printer/{id}/status`, `mhs://printer/{id}/history`, `mhs://printer/{id}/descriptor`, `mhs://reference-objects` |
-| Prompts | `diagnose_print`, `tune_settings`, `design_iteration` |
-
-Slicing drives the slicer you already have — OrcaSlicer, Bambu Studio or
-PrusaSlicer — rather than reimplementing one. `slice_model` takes an *intent*
-(`draft`, `speed`, `balanced`, `quality`, `fine`, `strong`) whose layer height is
-derived from the printer's own nozzle and layer-height limits, and every
-individual setting is still overridable alongside it. `compare_slice_intents`
-slices the same mesh several ways and reports the slicer's own time and filament
-estimates, so "is quality worth it here?" gets a number instead of an opinion.
-Without a slicer on the `PATH` every other tool still works; only slicing needs
-one.
-
-### Robot vacuums
-
-| Area | Tools |
-| --- | --- |
-| Monitoring | `vacuum_status` (state, battery, suction, position, faults) |
-| Map | `get_map` (rendered with a millimetre grid, rooms, robot and dock), `list_rooms` |
-| Cleaning | `start_cleaning` (whole map or rooms by name), `clean_zone`, `pause_cleaning`, `resume_cleaning`, `stop_cleaning`, `return_to_dock` |
-| Aiming | `go_to` (coordinates, a room name, or a saved location), `save_location`, `list_locations`, `delete_location` |
-| Settings | `set_suction`, `set_water_flow`, `find_vacuum` |
-
-Full guide: [docs/ROBOROCK.md](docs/ROBOROCK.md).
-
-#### Sending it somewhere
-
-The map arrives as a picture plus calibration points relating pixels to the
-robot's own millimetre frame. `get_map` renders it with a grid **labelled in
-those millimetres**, so a coordinate read off the image goes straight into
-`go_to`:
-
-> *"Show me the map. Send it to the spot just inside the back door, and save
-> that as 'back door' so I can say it next time."*
-
-Coordinates are checked against the map's real extent first — the protocol
-accepts anything in a wide range, and an off-map target makes the robot do
-nothing at all, which reads as a silent failure.
-
-## The design loop
-
-The point of the model-side tools is that Claude can size a part against a real
-object, see what it will look like, know in advance which detail the machine
-cannot reproduce, print it, and then measure the result through the camera:
-
-```
-analyze_model  -> dimensions, volume, and every finding that matters:
-                  fits the plate? detail below the extrusion width? thin walls?
-                  overhangs? bed contact? layer count? grams of filament?
-preview_model  -> orthographic views at a shared scale, with a mm scale bar and
-                  overhangs tinted red — an image, so the model can actually look
-camera_grid    -> a frame with a labelled pixel grid, so coordinates are read
-                  rather than guessed
-camera_calibrate("sgd_1", 88)   -> a coin of known diameter fixes mm-per-pixel
-scale_model(target_mm=24.65)    -> dry run first: it reports how much detail
-                                   crosses the printable threshold either way
-camera_measure -> measure the printed part, compare against the target, and get
-                  the rescale factor that would correct it
-log_print_result -> the journal, so the next iteration starts from evidence
-```
-
-Worked example: [docs/DESIGN_LOOP.md](docs/DESIGN_LOOP.md).
-
-Two honest limits. Feature size is the part's local thickness, measured by
-casting rays inward from a few thousand points on its surface, so triangle size
-does not affect it; but a feature under about 0.1% of the surface can be
-missed, and narrow gaps and slots are not measured. And the
-chamber camera is off-axis with lens distortion, so measurements are good to a
-few percent with a reference object in the same plane — not caliper-grade. Both
-caveats are returned with the results rather than buried here.
-
-## Watching a print
-
-A print is not one event. The moments worth a photograph are few and
-predictable, and the first layer is worth more than all the rest put together —
-adhesion, squish, warping and a shifted origin are all visible there and nowhere
-else so cheaply.
-
-`watch_print` polls in the background and saves a frame each time the job
-crosses a stage: `start`, `first_layer`, `quarter`, `half`, `three_quarters`,
-`finished`, plus `failed`, `paused` and `alert` whenever the printer says so.
-Each stage fires **once** — crossings are computed from the transition, not the
-current value, so a state that persists for a hundred polls is recorded a single
-time, and a slow poll that skips past two stages still records both.
-
-```
-start_print(file=..., confirm=True)      -> run_id
-watch_print(run_id=...)                  -> frames start landing in the journal
-review_print_stages(run_id=...)          -> what was captured, and which frames
-                                            have no caption yet
-read_capture(path)                       -> look at one
-caption_print_stage(observation_id, "…") -> write down what is actually there
-print_report(run_id=...)                 -> the whole run: timeline, captions,
-                                            actual time vs the slicer's estimate
-```
-
-Captioning is deliberately the model's job rather than the driver's: the tool
-takes the photograph, Claude reads it, and the reading is stored as text — so
-the report is still legible long after the images have left the context window.
-The report also names what it *didn't* get (`missing_milestones`), because a
-first-layer frame that was never taken is worth knowing about.
-
-From the shell, the same thing:
-
-```bash
-mhs monitor --list-stages          # what it can capture, and why each matters
-mhs monitor --run 7                # foreground watcher, Ctrl-C to stop
-mhs stages --run 7                 # what it captured
-mhs caption 12 "flat, no lifted corners"
-mhs report 7                       # the write-up
-```
-
-Full guide: [docs/MONITORING.md](docs/MONITORING.md).
-
-## A real run, start to finish
-
-> *"I want to print a figurine display rack, much like a staircase... design it
-> to make the most of one IKEA Detolf shelf... can we make it stackable?"*
-
-In one conversation, Claude:
-
-1. designed it as meshes with stand-in figures and showed it in a 3D viewer;
-2. looked up the shelf (about 390 × 330 mm, 381 mm high) and sized it to the
-   A1 mini's 180 mm plate;
-3. compared settings with the slicer's own numbers (7 h 18 → 6 h 08 per
-   riser) and redesigned it as a stackable 176 × 100 × 50 mm block that prints
-   in 2 h 56;
-4. checked the stacking fit on the meshes (0 mm³ overlap; a 0.31 mm slide
-   collides);
-5. asked before printing, then printed it, watched it, captioned every stage
-   frame, and filed the run report;
-6. wrote down every preflight check before the next block, and that record
-   caught the slicer placing the part over the printer's purge line.
-
-<p align="center">
-  <img src="docs/images/detolf/detolf_cabinet.jpg" alt="The stack in a Detolf cabinet" width="32%">
-  <img src="docs/images/detolf/detolf_fit.jpg" alt="The fit, measured" width="64%">
-</p>
-
-Full write-up, with the numbers and what went wrong:
-[docs/CASE_STUDY_DETOLF.md](docs/CASE_STUDY_DETOLF.md).
-
-## Install
-
-Python 3.10+.
-
-```bash
-git clone https://github.com/zhenwei2972/Model-hardware-standard-Bambu-labs-.git
-cd Model-hardware-standard-Bambu-labs-
-python3 -m venv .venv && .venv/bin/pip install -e ".[dev]"
-```
-
-## Configure a printer
-
-For a vacuum instead, see [docs/ROBOROCK.md](docs/ROBOROCK.md) — it is a
-different setup (an account token, not a LAN code).
-
-On the A1 / A1 mini touchscreen: **Settings (gear) → WLAN** — the network
-screen, not the general one.
-
-1. Toggle **LAN Only Mode** on — this is also what makes the Access Code appear.
-2. **Power-cycle the printer.** Developer Mode does not show up until it has
-   restarted.
-3. Back in Settings → WLAN, toggle **Developer Mode** on — without it, firmware
-   ≥ 01.05 on the A1 series silently ignores start/stop/heat commands.
-
-Note that LAN Only Mode cuts the printer off from Bambu's cloud, so **the Bambu
-Handy phone app stops working with it**. Bambu Studio on the same network is
-unaffected, and turning the mode back off restores Handy with no re-pairing.
-
-Then collect three values — **IP address** and **Access Code** from
-Settings → Network, and the **serial number** from the sticker or Bambu Studio →
-Device (it is the TLS certificate name, so it must match exactly):
-
-```bash
-export BAMBU_HOST=192.168.1.42
-export BAMBU_SERIAL=0309CA1234567890
-export BAMBU_ACCESS_CODE=12345678
-```
-
-or copy `examples/config.example.toml` to `config.toml` (git-ignored) for
-multiple printers, a slicer binary and the stage-watcher's poll interval. Full
-walkthrough, including what each failure mode looks like:
-[docs/SETUP.md](docs/SETUP.md).
-
-## Connect it to Claude
-
-```bash
-claude mcp add mhs \
-  --env BAMBU_HOST=192.168.1.42 \
-  --env BAMBU_SERIAL=0309CA1234567890 \
-  --env BAMBU_ACCESS_CODE=12345678 \
-  --env MHS_READ_ONLY=1 \
-  -- "$PWD/.venv/bin/mhs-mcp"
-```
-
-For Claude Desktop, merge [examples/claude_desktop_config.json](examples/claude_desktop_config.json)
-into `claude_desktop_config.json` (macOS `~/Library/Application Support/Claude/`,
-Windows `%APPDATA%\Claude\`). Use absolute paths there — the desktop app does
-not inherit your shell's `PATH`; `which mhs-mcp` gives you the right one.
-
-Then, in a session:
-
-> *"Is the A1 mini free? If so print `cache/bracket_v3.3mf` at 06:30 tomorrow,
-> and look at the first layer once it starts."*
-
-## Testing it
-
-Three tiers. The first two need no hardware, and each stands on its own.
-
-### 1. No hardware, no Claude
-
-Exercises every code path except the real transports:
-
-```bash
-.venv/bin/pytest -q                  # 460 tests, no hardware required
-export MHS_MOCK=1                    # a simulated A1 mini
-.venv/bin/mhs describe               # the MHS device descriptor
-.venv/bin/mhs channels               # every read/write channel and its limits
-.venv/bin/mhs write nozzle.temperature 400   # refused by the driver, with the reason
-.venv/bin/mhs inspect your-model.stl # printability critique
-.venv/bin/mhs preview your-model.stl -o preview.png
-.venv/bin/mhs grid && .venv/bin/mhs calibrate sgd_1 100 && .venv/bin/mhs measure 0 0 200 0
-.venv/bin/mhs slice --list-intents   # what each intent trades away
-.venv/bin/mhs monitor --list-stages  # the stages a watcher captures, and why
-.venv/bin/mhs doctor
-
-# and the vacuum half, against a simulated Saros
-printf '[server]\ndefault_device="saros"\n[devices.saros]\ndriver="mock_vacuum"\n' > config.toml
-.venv/bin/mhs vacuum && .venv/bin/mhs rooms
-.venv/bin/mhs map -o map.png          # open it: the grid is in robot millimetres
-.venv/bin/mhs goto "dog bowl" --x 24200 --y 26200 -y
-```
-
-With `MHS_MOCK=1` each CLI command is a fresh process, so `mhs print` followed
-by `mhs status` shows idle again — the fake printer has no memory between
-invocations. Inside one MCP session it persists normally.
-
-### 2. Wired to Claude, still no hardware
-
-Checks the tools from the model's side before hardware is involved:
-
-```bash
-claude mcp add mhs-demo --env MHS_MOCK=1 -- "$PWD/.venv/bin/mhs-mcp"
-```
-
-> *"Run describe_device and tell me what this printer can and cannot do. Then
-> analyze_model on ~/models/thing.stl, show me the preview, and tell me what
-> scaling it to 24.65 mm would cost in detail."*
-
-A rendered image and a printability verdict means the whole stack works — only
-the transports are untested.
-
-### 3. Real hardware
-
-```bash
-.venv/bin/mhs doctor
-```
-
-```
-printer 'a1mini' driver=bambu model=A1 mini
-  host 192.168.1.42  serial 01P0***  tls=verify
-  tcp/8883  mqtt    open
-  tcp/990   ftps    open
-  tcp/6000  camera  open
-  telemetry  ok    a1mini: idle, nozzle 24/0C, bed 24/0C
-  files      ok    3 items/bytes
-  camera     ok    98431 items/bytes
-all good
-```
-
-`doctor` probes each port, then each transport, and names the misconfiguration:
-
-| Symptom | Cause |
-| --- | --- |
-| all three ports closed | wrong IP, printer asleep, or Wi-Fi client isolation / separate VLAN |
-| tcp/6000 closed only | camera not served — re-check LAN Only Mode and power-cycle once |
-| `CERTIFICATE_VERIFY_FAILED` | serial mismatch — re-check it, or set `tls_mode = "ca_only"` |
-| FTPS login refused | wrong Access Code (it changes after re-pairing) |
-| telemetry fine, commands `acknowledged: false` | Developer Mode is off |
-
-Start with `MHS_READ_ONLY=1` so the first session can only look, then drop it.
-
-## Safety model
-
-Hardware that heats to 220 °C deserves more care than a web API:
-
-* **Confirmation gate.** `start_print`, `upload_and_print`, `stop_print`,
-  `clear_print_error` and `send_gcode` refuse to act unless called with
-  `confirm=true`; the first call returns what *would* happen. The model has to
-  decide twice.
-* **Read-only mode.** `MHS_READ_ONLY=1` leaves monitoring and camera tools
-  working and rejects every write.
-* **Gcode allow-list.** Raw gcode is limited to temperature/fan/homing/report
-  commands unless `allow_raw_gcode = true`.
-* **Pre-flight.** Prints are refused while the printer is busy or reporting a
-  fatal/serious HMS alert; scheduled jobs wait for an idle printer and expire
-  instead of starting hours late.
-* **TLS is verified.** Bambu's CA is pinned and the certificate's CN (the
-  serial) is checked via SNI — `tls_mode = "verify"` by default, with
-  `ca_only`/`insecure` as explicit, documented downgrades.
-* **Credentials stay local.** The access code lives in `config.toml` or the
-  environment; both are git-ignored, and nothing is sent anywhere but the
-  printer on your LAN.
-
-## Is it actually generic?
-
-It claimed to be, and then a robot vacuum tested the claim. Three layers:
-
-```
-Device   channels · read/write · safety limits · descriptor · capabilities
-  ├─ Printer   nozzle, bed, files, plates, prints
-  └─ Vacuum    rooms, zones, coordinates, dock
-```
-
-`Device` (`mhs/device.py`) is what the MCP tools, the CLI and the descriptor
-generator talk to. A **device class** adds the verbs for its kind of hardware
-and declares its channels; a **driver** implements one of those. Adding the
-vacuum needed no change to the channel machinery, the limit enforcement, the
-descriptor generator, the CLI plumbing or the confirmation gates — they were
-already device-shaped. What it did change, honestly: `printer_id` became
-`device_id` throughout (with a SQLite migration), the descriptor's
-printer-specific sections moved behind a `descriptor_profile()` hook that each
-device class fills in, and `[printers.*]` in config.toml became `[devices.*]`
-(the old spelling still loads).
-
-A new driver is one class and one `register()` call:
-
-```python
-class MoonrakerPrinter(Printer):
-    driver_name = "moonraker"
-    @property
-    def capabilities(self): return (Capability.START_PRINT, Capability.FILE_UPLOAD, ...)
-    async def status(self) -> PrinterStatus: ...
-```
-
-…and it gets the MHS read/write channels, the enforced limits and a descriptor
-for free, because the base class builds them from the capabilities it declares.
-Tools call `device.require(Capability.CAMERA_SNAPSHOT)` rather than asking what
-brand it is, so a driver that lacks a feature degrades with a clear message
-instead of a stack trace — and naming a vacuum where a printer tool expects one
-is an explicit error, not a confusing failure. `drivers/mock.py` and
-`drivers/mock_vacuum.py` are complete worked examples, and are what the test
-suite runs against.
-
-## Layout
-
-```
-src/mhs/
-  device.py          Device base: channels, read/write, descriptor, capabilities
-  printer.py         Printer device class      vacuum.py   Vacuum device class
-  models.py          normalised status types   specs.py    hardware specs and limits
-  config.py          TOML + env configuration  store.py    SQLite: jobs, journal,
-  scheduler.py       deferred prints                       calibration, locations
-  app.py             pool + store + scheduler  server.py   the MCP surface
-  monitor.py         print stages and the run report
-  slicing/           parameters.py (intents), slicer.py (the slicer CLI driver)
-  cli.py             the same capabilities for humans
-  standard/          channels.py (limits), descriptor.py (the MHS reference file)
-  design/            mesh.py (STL/OBJ/3MF), render.py (z-buffer rasteriser),
-                     printability.py (the critique), vision.py (camera measurement),
-                     mapviz.py (map grid + pixel/millimetre transform)
-  drivers/bambu/     mqtt.py files.py camera.py commands.py state.py hms.py tls.py
-  drivers/roborock/  client.py (credentials) commands.py state.py vacuum.py
-  drivers/mock.py    simulated printer         drivers/mock_vacuum.py  simulated robot
-docs/                PROTOCOL.md, SETUP.md, ROBOROCK.md, DESIGN_LOOP.md,
-                     MONITORING.md, MHS_ALIGNMENT.md, PUBLISHING.md, ROADMAP.md
-```
-
-## Tests
-
-```bash
-pytest          # no hardware required — every test runs against the mock driver
-ruff check .
-```
-
-The parts that are expensive to debug against a real machine are tested
-directly: command payloads, delta-merged telemetry, camera framing, FTPS path
-safety, scheduler windows, channel safety limits, slicer argument construction,
-milestone detection (each stage fires exactly once, and a slow poll loses
-nothing), and the geometry - mesh volume and area are checked against analytic
-values, and the renderer against known occlusion cases.
-
-## Publishing
-
-[docs/PUBLISHING.md](docs/PUBLISHING.md) covers the registry manifest
-([`server.json`](server.json), validated against the official schema), PyPI
-release, and the discoverability checklist.
-
-## Credits
-
-Wire formats from [OpenBambuAPI](https://github.com/Doridian/OpenBambuAPI)
-(MQTT, FTPS, the port-6000 camera protocol and the pinned CA bundle). Bambu Lab
-does not endorse or support this project, and neither does Anthropic: the MHS
-alignment here is this repository's reading of a public announcement, not a
-certification.
-
-MIT licensed.
+devices are read and written through named channels, with safety limits enforced in code rather than in
+the prompt. Licence: see [LICENSE](LICENSE).
