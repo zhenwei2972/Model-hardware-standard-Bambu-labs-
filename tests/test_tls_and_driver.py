@@ -98,9 +98,59 @@ def test_mqtt_sequence_ids_increment(bambu):
 def test_reconnect_triggers_a_full_status_resync(bambu, monkeypatch):
     """The A1/P1 only send deltas, so a reconnect must re-request everything."""
     published: list[dict] = []
-    monkeypatch.setattr(bambu._mqtt, "publish", lambda payload, qos=1: published.append(payload))
+    monkeypatch.setattr(bambu._mqtt, "publish", lambda payload, qos=0: published.append(payload))
 
     bambu._resync()
 
     commands_sent = [next(iter(p.values()))["command"] for p in published]
     assert commands_sent == ["pushall", "get_version"]
+
+
+def _paho_client():
+    import paho.mqtt.client as mqtt
+
+    return mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="test", protocol=mqtt.MQTTv311)
+
+
+@pytest.mark.parametrize("command", ["project_file", "stop", "pause"])
+def test_commands_are_never_kept_for_resend_after_a_reconnect(bambu, command):
+    """A start-print command must reach the printer once, or not at all.
+
+    paho keeps every QoS 1 message the broker has not acknowledged and
+    publishes it again after each reconnect. Sent that way, one start
+    command from 4 Oct restarted the bumper print every time the connection
+    dropped and came back - including after a power cycle, on a plate that
+    still held the finished part. Commands go out at QoS 0, and the
+    printer's own report echoing the sequence_id is the acknowledgement.
+    """
+    from mhs.drivers.bambu import commands
+    from mhs.errors import ConnectionFailed
+
+    client = _paho_client()
+    bambu._mqtt._client = client
+    bambu._mqtt._connected.set()
+    payload = {
+        "project_file": lambda: commands.project_file("cache/case.gcode.3mf", sequence_id=1),
+        "stop": lambda: commands.stop(sequence_id=1),
+        "pause": lambda: commands.pause(sequence_id=1),
+    }[command]()
+
+    # No socket in tests, so the publish itself fails - what matters is that
+    # nothing is left queued to go out again on the next connection.
+    with pytest.raises(ConnectionFailed):
+        bambu._mqtt.publish_and_wait(payload, timeout=0.1)
+    assert client._out_messages == {}
+
+
+def test_publish_defaults_to_fire_and_forget(bambu, monkeypatch):
+    sent: list[int] = []
+
+    class Info:
+        rc = 0
+
+    client = _paho_client()
+    monkeypatch.setattr(client, "publish", lambda topic, payload, qos=0: sent.append(qos) or Info())
+    bambu._mqtt._client = client
+    bambu._mqtt._connected.set()
+    bambu._mqtt.publish({"print": {"command": "pushall", "sequence_id": "1"}})
+    assert sent == [0]

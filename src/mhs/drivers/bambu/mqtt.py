@@ -161,7 +161,16 @@ class BambuMqtt:
             self._sequence += 1
             return self._sequence
 
-    def publish(self, payload: dict, qos: int = 1) -> None:
+    def publish(self, payload: dict, qos: int = 0) -> None:
+        """Send one request. QoS 0, deliberately - never raise it.
+
+        paho keeps every QoS 1 message the broker has not acknowledged and
+        publishes it again after each reconnect. A start-print command sent that
+        way came back after every Wi-Fi drop and power cycle and restarted the
+        job, on a plate that still held the finished part. The printer's report
+        echoing the sequence_id (``publish_and_wait``) is the acknowledgement
+        that matters; the transport must not retry on its own.
+        """
         if self._client is None or not self.connected:
             raise ConnectionFailed(f"not connected to {self.host}", hint=_AUTH_HINT)
         info = self._client.publish(self.request_topic, json.dumps(payload), qos=qos)
