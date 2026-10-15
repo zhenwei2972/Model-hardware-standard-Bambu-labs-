@@ -57,6 +57,7 @@ packages = ["src/mhs"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["."]           # tests import shared helpers as tests.conftest
 asyncio_mode = "auto"
 filterwarnings = ["error::DeprecationWarning:mhs.*"]
 

@@ -90,6 +90,8 @@ Stuck? [docs/SETUP.md](docs/SETUP.md) shows what each common problem looks like 
 
 ## See it in action
 
+- **[Walkthrough: a pipette tip sorter, from request to print](https://github.com/zhenwei2972/benchscale/blob/main/docs/examples/tip-sorter-walkthrough.md).**
+  The prompts, the design, the safety checks, the print and its report, step by step.
 - **[Example print report](docs/examples/print-report-bracelet-stand.md).** A real print with a 40-minute
   filament pause, explained stage by stage.
 - **[From request to print](docs/CASE_STUDY_DETOLF.md).** A display riser for an IKEA Detolf cabinet,
