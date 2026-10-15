@@ -20,7 +20,8 @@ from pathlib import Path
 
 import numpy as np
 import trimesh
-from shapely.geometry import Polygon, box as rect
+from shapely.geometry import Polygon
+from shapely.geometry import box as rect
 
 SHELF_W, SHELF_D, SHELF_H = 390.0, 330.0, 381.0
 
