@@ -90,3 +90,8 @@ def test_an_unlit_chamber_reads_as_dark():
 
 def test_a_lit_chamber_does_not():
     assert not frame_is_dark(_frame(150))
+
+
+def test_inspect_reads_the_slicers_time_estimate(tmp_path):
+    gcode = "; model printing time: 2h 41m 9s; total estimated time: 2h 52m 49s\n" + TEXTURED_HEADER
+    assert inspect(_write_3mf(tmp_path / "p.gcode.3mf", gcode)).estimated_time_minutes == 173

@@ -27,7 +27,7 @@ from .design.printability import scale_advice
 from .design.render import render_to_png
 from .errors import MHSError
 from .models import PrintOptions
-from .monitor import MILESTONES, build_report, stage_name
+from .monitor import MILESTONES, build_report, report_markdown, stage_name
 from .scheduler import parse_when
 from .specs import spec_for
 from .standard.descriptor import descriptor_markdown
@@ -315,6 +315,9 @@ async def cmd_report(app, args) -> int:
     report = build_report(run, stages)
     if args.json:
         _print_json(report)
+        return 0
+    if args.markdown:
+        print(report_markdown(report))
         return 0
 
     print(report["summary"])
@@ -910,6 +913,7 @@ def build_parser() -> argparse.ArgumentParser:
     p = add("report", cmd_report, "how a print went, stage by stage")
     p.add_argument("run_id", type=int)
     p.add_argument("--json", action="store_true")
+    p.add_argument("--markdown", action="store_true", help="a readable page you can share (no local paths)")
 
     p = add("inspect", cmd_inspect, "measure a mesh and check it against the printer")
     p.add_argument("path")

@@ -113,6 +113,11 @@ PRINT_ERROR_MESSAGES: dict[str, str] = {
     "07FF_8010": "The external spool or its filament is stuck",
     "07FF_8011": "External spool has run out of filament",
     "07FF_8013": "Timed out purging the old filament; is it stuck or the extruder clogged?",
+    "07FF_8007": (
+        "Look at the nozzle: if filament came out, select Done; "
+        "if not, push it forward slightly and retry"
+    ),
+    "07FF_C006": "Feed filament into the PTFE tube until it will not go any further",
 }
 
 # AMS run-outs follow one pattern across units A-D and slots 1-4:
@@ -129,6 +134,7 @@ _MODULES = {
     "0702": "AMS C",
     "0703": "AMS D",
     "07FF": "external spool",
+    "12FF": "external spool on an A1 / A1 mini",
     "0C00": "camera / first layer inspection",
 }
 
@@ -151,10 +157,25 @@ def _unlisted(formatted: str) -> str:
     return f"Code not in the bundled table{where}; see the wiki link"
 
 
+def _a1_series(formatted: str, table: dict[str, str]) -> str | None:
+    """A1 / A1 mini report external-spool faults under 12FF, which Bambu's published
+    list does not include. The same fault on other machines is 07FF; read it
+    through that code and say plainly that the meaning is inferred."""
+    if not formatted.startswith("12FF"):
+        return None
+    meaning = table.get("07FF" + formatted[4:])
+    if not meaning:
+        return None
+    return f"{meaning} (A1-series code; meaning inferred from the matching 07FF code)"
+
+
 def describe_hms(formatted: str) -> str:
     """Plain-language meaning of an ``AAAA_BBBB_CCCC_DDDD`` code."""
     if formatted in HMS_MESSAGES:
         return HMS_MESSAGES[formatted]
+    inferred = _a1_series(formatted, HMS_MESSAGES)
+    if inferred:
+        return inferred
     runout = _AMS_RUNOUT.match(formatted)
     if runout:
         unit = "ABCD"[int(runout.group(1))]
@@ -164,7 +185,8 @@ def describe_hms(formatted: str) -> str:
 
 def describe_print_error(formatted: str) -> str:
     """Plain-language meaning of an ``AAAA_BBBB`` print error."""
-    return PRINT_ERROR_MESSAGES.get(formatted) or _unlisted(formatted)
+    return (PRINT_ERROR_MESSAGES.get(formatted) or _a1_series(formatted, PRINT_ERROR_MESSAGES)
+            or _unlisted(formatted))
 
 
 def alert_from_hms(entry: dict) -> DeviceAlert:

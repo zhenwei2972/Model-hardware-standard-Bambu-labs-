@@ -188,7 +188,7 @@ def write_profiles(work: Path, root: Path, target: BambuMachine, plate: str,
     filament["compatible_printers_condition"] = ""
 
     paths = (work / "machine.json", work / "process.json", work / "filament.json")
-    for path, data in zip(paths, (machine, process, filament)):
+    for path, data in zip(paths, (machine, process, filament), strict=True):
         path.write_text(json.dumps(data, indent=1))
     return paths
 

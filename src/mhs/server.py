@@ -33,7 +33,7 @@ from .design.render import render_to_png
 from .design.vision import frame_is_dark
 from .errors import CommandRejected, MHSError, NotSupported
 from .models import Capability, CleanOptions, PrintOptions
-from .monitor import MILESTONES, build_report, stage_name
+from .monitor import MILESTONES, build_report, report_markdown, stage_name
 from .preflight import preflight
 from .printer import Printer
 from .scheduler import parse_when
@@ -392,6 +392,15 @@ def create_server(settings: Settings | None = None, *, run_scheduler: bool = Tru
         started["uploaded"] = entry.to_dict()
         if checks:
             started["preflight"] = checks
+        if started.get("ok") and started.get("run_id"):
+            # Keep the slicer's estimate with the run, so print_report can compare.
+            try:
+                from . import preflight
+                estimate = preflight.inspect(local_path, plate).estimated_time_minutes
+            except Exception:                              # the print has started; never fail it here
+                estimate = None
+            if estimate:
+                app.store.update_run_settings(started["run_id"], {"estimated_time_minutes": estimate})
         return started
 
     @server.tool()
@@ -876,18 +885,22 @@ def create_server(settings: Settings | None = None, *, run_scheduler: bool = Tru
         return _ok(observation=row)
 
     @server.tool()
-    async def print_report(run_id: int) -> dict:
+    async def print_report(run_id: int, markdown: bool = False) -> dict:
         """How a print went: timeline, stage captions, and time against the estimate.
 
         Assembles everything recorded for the run - what was sliced, what was
         seen at each stage, how long it actually took - into one report. If it
         lists `uncaptioned_images`, caption those first and call again.
+        `markdown=True` adds the same report as a readable page (no local paths).
         """
         run = app.store.get_run(run_id)
         if run is None:
             return {"ok": False, "error": "NotFound", "message": f"no run {run_id}"}
         stages = [o for o in run["observations"] if str(o.get("kind", "")).startswith("stage:")]
-        return _ok(report=build_report(run, stages))
+        report = build_report(run, stages)
+        if markdown:
+            return _ok(report=report, markdown=report_markdown(report))
+        return _ok(report=report)
 
     # ------------------------------------------------------------ diagnosis
     @server.tool()

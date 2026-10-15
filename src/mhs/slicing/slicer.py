@@ -45,15 +45,15 @@ class SlicerFlavour(str, Enum):
 #: Executable names to look for, in preference order: the Bambu-native slicers
 #: first, since their profiles match the printers this project targets.
 BINARIES: dict[SlicerFlavour, tuple[str, ...]] = {
-    SlicerFlavour.ORCA: ("orca-slicer", "orcaslicer", "OrcaSlicer", "Orca Slicer"),
     SlicerFlavour.BAMBU: ("bambu-studio", "bambustudio", "BambuStudio", "bambu-studio-cli"),
+    SlicerFlavour.ORCA: ("orca-slicer", "orcaslicer", "OrcaSlicer", "Orca Slicer"),
     SlicerFlavour.PRUSA: ("prusa-slicer", "prusaslicer", "PrusaSlicer"),
 }
 
 #: Where a stock macOS install puts each slicer's CLI, same preference order.
 APP_BUNDLES: dict[SlicerFlavour, tuple[str, ...]] = {
-    SlicerFlavour.ORCA: ("/Applications/OrcaSlicer.app/Contents/MacOS/OrcaSlicer",),
     SlicerFlavour.BAMBU: ("/Applications/BambuStudio.app/Contents/MacOS/BambuStudio",),
+    SlicerFlavour.ORCA: ("/Applications/OrcaSlicer.app/Contents/MacOS/OrcaSlicer",),
     SlicerFlavour.PRUSA: ("/Applications/PrusaSlicer.app/Contents/MacOS/PrusaSlicer",),
 }
 
@@ -141,7 +141,8 @@ class SliceResult:
 
 
 def find_slicer(explicit: str | None = None, env: dict | None = None) -> tuple[Path, SlicerFlavour]:
-    """Locate an installed slicer, preferring the Bambu-native ones.
+    """Locate an installed slicer: Bambu Studio first (Bambu's own slicer, with the
+    machine's system profiles), then OrcaSlicer, then PrusaSlicer.
 
     ``explicit`` (or ``MHS_SLICER``) pins a specific binary; its flavour is
     inferred from the filename, which is why the name has to be recognisable.

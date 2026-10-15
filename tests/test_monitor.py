@@ -9,7 +9,7 @@ from tests.conftest import tool_body
 
 from mhs.app import MHSApp
 from mhs.models import DeviceAlert, PrinterStatus, PrintOptions, PrintState
-from mhs.monitor import PrintMonitor, build_report, detect_milestones, stage_name
+from mhs.monitor import PrintMonitor, build_report, detect_milestones, report_markdown, stage_name
 from mhs.server import create_server
 from mhs.store import Store
 
@@ -489,3 +489,46 @@ async def test_watching_a_vacuum_is_refused(vacuum_settings):
         assert body["ok"] is False and "not a 3D printer" in body["message"]
     finally:
         srv.mhs_app.store.close()
+
+
+async def test_the_start_frame_records_layer_zero_not_the_last_jobs_layer(monitor):
+    watcher, state, _ = monitor
+    state["status"] = status(PrintState.FINISHED, layer=267, total=267)   # the last job, still on show
+    await watcher.tick()
+    state["status"] = status(PrintState.RUNNING, layer=267, total=670)    # new job, old layer count
+    await watcher.tick()
+    saved = {row["kind"]: row for row in watcher.store.list_observations(run_id=watcher.run_id)}
+    assert saved["stage:start"]["layer"] == 0
+
+
+def test_report_closes_an_unlogged_run_from_the_watchers_final_frame():
+    now = time.time()
+    run = make_run(outcome="in_progress", ended_at=None, ended_at_iso=None, started_at=now - 3600)
+    report = build_report(run, [observation("stage:start", now - 3600, id=1),
+                                observation("stage:finished", now, id=2)])
+    assert report["outcome"] == "finished"
+    assert report["duration_minutes"] == 60
+    assert report["ended_from"] == "the watcher's final frame"
+    assert report["time_vs_estimate"]["note"] == "close to the slicer's estimate"
+
+
+def test_report_lists_interruptions_and_says_the_time_is_not_like_for_like():
+    now = time.time()
+    report = build_report(make_run(), [
+        observation("stage:paused", now - 1800, id=1, layer=15),
+        observation("stage:alert", now - 1790, id=2, text="PRINT_ERROR_0300_8015"),
+    ])
+    assert [row["layer"] for row in report["interruptions"]] == [15, 1]
+    assert "not like for like" in report["time_vs_estimate"]["note"]
+
+
+def test_the_markdown_report_reads_plainly_and_leaves_out_local_paths():
+    now = time.time()
+    finished = observation("stage:finished", now, id=1, image_path="/Users/me/frame.jpg",
+                           caption="parts intact")
+    report = build_report(make_run(), [finished])
+    page = report_markdown(report)
+    assert page.startswith("# Print report: benchy")
+    assert "parts intact" in page and "MEASURED" in page and "ESTIMATED" in page
+    assert "/Users/me" not in page
+    assert "/Users/me/frame.jpg" in report_markdown(report, include_paths=True)

@@ -83,10 +83,12 @@ class SlicedFile:
     filaments: list[str] = field(default_factory=list)
     nozzle_c: float | None = None
     plate_temps: dict[str, float] = field(default_factory=dict)
+    estimated_time_minutes: int | None = None   # the slicer's own estimate, from the header
 
     def to_dict(self) -> dict:
         return {
             "path": self.path,
+            "estimated_time_minutes": self.estimated_time_minutes,
             "plate": self.plate,
             "bed_type": self.bed_type,
             "bed_c": self.bed_c,
@@ -149,6 +151,12 @@ def inspect(path: str | Path, plate: int = 1, max_header_lines: int = 4000) -> S
             temp = _as_float(value)
             if temp is not None:
                 info.plate_temps[field_name[: -len("_plate_c")]] = temp
+
+    # The slicer's time estimate, for comparing against how long the print really took.
+    estimate = re.search(r"total estimated time:\s*([^;\n]+)", "\n".join(head))
+    if estimate:
+        from .slicing.slicer import _minutes
+        info.estimated_time_minutes = _minutes(estimate.group(1))
 
     # The bed target the machine will actually act on, not a profile value.
     command = _BED_COMMAND.search("\n".join(head))

@@ -295,6 +295,15 @@ class Store:
         )
         return int(cur.lastrowid)
 
+    def update_run_settings(self, run_id: int, extra: dict) -> None:
+        """Merge more facts into a run's settings (e.g. the slicer's time estimate)."""
+        rows = self._query("SELECT settings_json FROM print_runs WHERE id = ?", (run_id,))
+        if not rows:
+            return
+        settings = json.loads(rows[0][0] or "{}")
+        settings.update(extra)
+        self._execute("UPDATE print_runs SET settings_json = ? WHERE id = ?", (json.dumps(settings), run_id))
+
     def finish_run(
         self,
         run_id: int,

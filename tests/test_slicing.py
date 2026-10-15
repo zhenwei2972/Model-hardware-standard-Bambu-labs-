@@ -322,3 +322,17 @@ def test_unmappable_setting_is_refused(tmp_path):
 
 def test_spec_lookup_feeds_the_intents():
     assert spec_for("A1 mini").default_nozzle_mm == 0.4
+
+
+def test_bambu_studio_is_preferred_when_several_slicers_are_installed(tmp_path, monkeypatch):
+    import os
+
+    from mhs.slicing.slicer import SlicerFlavour, find_slicer
+    for name in ("orca-slicer", "bambu-studio", "prusa-slicer"):
+        exe = tmp_path / name
+        exe.write_text("#!/bin/sh\n")
+        exe.chmod(0o755)
+    monkeypatch.setenv("PATH", str(tmp_path) + os.pathsep + os.environ.get("PATH", ""))
+    monkeypatch.delenv("MHS_SLICER", raising=False)
+    path, flavour = find_slicer()
+    assert flavour is SlicerFlavour.BAMBU and path.name == "bambu-studio"

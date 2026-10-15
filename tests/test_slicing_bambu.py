@@ -53,8 +53,10 @@ def sliced(tmp_path, *, model_id="N1", bed_type="Textured PEI Plate", bed_c=65,
     path = tmp_path / name
     with zipfile.ZipFile(path, "w") as archive:
         archive.writestr("Metadata/plate_1.gcode", gcode)
-        archive.writestr("Metadata/slice_info.config",
-                         f'<config><plate><metadata key="printer_model_id" value="{model_id}"/></plate></config>')
+        archive.writestr(
+            "Metadata/slice_info.config",
+            f'<config><plate><metadata key="printer_model_id" value="{model_id}"/></plate></config>',
+        )
     return path
 
 
